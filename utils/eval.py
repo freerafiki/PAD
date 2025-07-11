@@ -1,10 +1,13 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import confusion_matrix, classification_report, roc_auc_score
 from typing import Tuple, Optional
 import os
 from pathlib import Path
+from utils.dataloaders import create_data_loaders
+from utils.models import load_model
+import json 
 
 def evaluate_model(
     model: nn.Module,
@@ -27,9 +30,9 @@ def evaluate_model(
                 outputs = model(data)
             else:  # resnet
                 outputs = model(data)
-            
+
             # Convert to probabilities
-            probabilities = torch.sigmoid(outputs).squeeze()
+            probabilities = outputs #torch.sigmoid(outputs).squeeze()
             
             # Store results
             all_predictions.extend((probabilities > 0.5).cpu().numpy())
@@ -49,15 +52,24 @@ def calculate_metrics(
     probabilities: np.ndarray
 ) -> dict:
     """Calculates various metrics for model evaluation."""
+    accuracy = np.mean(predictions == labels)
+    true_positive = np.sum(np.squeeze(predictions == 1) == np.squeeze(labels == 1))
+    precision = true_positive / len(predictions)
+    false_negatives = np.sum(np.squeeze(predictions == 0) == np.squeeze(labels == 1))
+    recall = false_negatives / len(predictions)
     metrics = {
-        'accuracy': np.mean(predictions == labels),
-        'precision': np.sum((predictions == 1) & (labels == 1)) / np.sum(predictions == 1) if np.sum(predictions == 1) > 0 else 0,
-        'recall': np.sum((predictions == 1) & (labels == 1)) / np.sum(labels == 1) if np.sum(labels == 1) > 0 else 0,
-        'f1_score': 2 * (metrics['precision'] * metrics['recall']) / (metrics['precision'] + metrics['recall']) if metrics['precision'] + metrics['recall'] > 0 else 0,
-        'auc': roc_auc_score(labels, probabilities)
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1_score': 2 * (precision * recall) / (precision + recall) if precision + recall > 0 else 0,
+        'auc': roc_auc_score(labels, probabilities),
+        'true_positive': true_positive.astype(np.float64),
+        'false_negatives': false_negatives.astype(np.float64)
     }
+
+    cm = confusion_matrix(labels, predictions)
     
-    return metrics
+    return metrics, cm
 
 def print_evaluation_results(
     metrics: dict,
@@ -84,15 +96,14 @@ def load_and_evaluate_model(
     """Loads a saved model and evaluates it on the validation set."""
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Load model
-    model = torch.load(model_path, map_location=device)
+
+    model = load_model(model_type=model_type, trained_model_path=model_path)    
     model.to(device)
     
     # Load validation data
     _, val_loader = create_data_loaders(
-        train_dir="./path/to/train/directory",
-        val_dir="./path/to/validation/directory",
+        train_dir='/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD/as_dataset/train',
+        val_dir='/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD/as_dataset/validation',
         batch_size=32,
         num_workers=4
     )
@@ -103,3 +114,7 @@ def load_and_evaluate_model(
     
     # Print results
     print_evaluation_results(metrics, confusion_matrix, class_report)
+
+    with open(os.path.join('checkpoints', model.model_name, 'metrics.json'), 'w') as jf:
+        json.dump(metrics, jf, indent=3)
+
