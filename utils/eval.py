@@ -24,12 +24,8 @@ def evaluate_model(
     with torch.no_grad():
         for batch_idx, (data, target) in enumerate(val_loader):
             data, target = data.to(device), target.to(device)
-            
-            # Forward pass
-            if model_type == "transformer":
-                outputs = model(data)
-            else:  # resnet
-                outputs = model(data)
+
+            outputs = model(data)
 
             # Convert to probabilities
             probabilities = outputs #torch.sigmoid(outputs).squeeze()
@@ -52,7 +48,7 @@ def calculate_metrics(
     probabilities: np.ndarray
 ) -> dict:
     """Calculates various metrics for model evaluation."""
-    accuracy = np.mean(predictions == labels)
+    accuracy = np.mean(np.squeeze(predictions == 1) == np.squeeze(labels == 1))
     true_positive = np.sum(np.squeeze(predictions == 1) == np.squeeze(labels == 1))
     precision = true_positive / len(predictions)
     false_negatives = np.sum(np.squeeze(predictions == 0) == np.squeeze(labels == 1))
@@ -62,9 +58,7 @@ def calculate_metrics(
         'precision': precision,
         'recall': recall,
         'f1_score': 2 * (precision * recall) / (precision + recall) if precision + recall > 0 else 0,
-        'auc': roc_auc_score(labels, probabilities),
-        'true_positive': true_positive.astype(np.float64),
-        'false_negatives': false_negatives.astype(np.float64)
+        'auc': roc_auc_score(labels, probabilities)
     }
 
     cm = confusion_matrix(labels, predictions)
@@ -105,7 +99,8 @@ def load_and_evaluate_model(
         train_dir='/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD/as_dataset/train',
         val_dir='/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD/as_dataset/validation',
         batch_size=32,
-        num_workers=4
+        num_workers=4,
+        force_validation_shuffle=False
     )
     
     # Evaluate model
