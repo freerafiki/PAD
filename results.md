@@ -1,5 +1,7 @@
 # Results
 
+Keeping track of the results of the quick attempts (using AI-enabled auto completion for boilerplate code, so most likely full of terrible stuff, be aware) for **binary classification** (correct alignment / incorrect alignment) of pairwise alignments. After I get something *almost working*, will try to fix the code and make it usable and see how to get it into the solver.
+
 ## Dataset (v1)
 9977 images (80/20 train/val split)
 - Training:
