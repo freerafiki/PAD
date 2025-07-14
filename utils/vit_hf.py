@@ -2,6 +2,8 @@ from transformers import ViTForImageClassification, ViTFeatureExtractor
 import torch 
 import torch.nn as nn
 
+
+
 class HuggingFaceTransformer(nn.Module):
     """Hugging Face transformer model for binary classification"""
     def __init__(

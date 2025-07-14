@@ -11,11 +11,50 @@ Keeping track of the results of the quick attempts (using AI-enabled auto comple
     - 998 correct
     - 998 wrong
 
-## Training Attempt 1 (11/07):
+## Version 2 (14/07):
+- Using Hugging Face library (wandb for logging)
+- 15 epochs, `training_batch_size=64`
+- Use `AdamW` as optimizer (`pytorch` implementation)
+- Data Augmentation using [Albumentationsx](https://github.com/albumentations-team/AlbumentationsX)
+- Attention Map visualization
+
+**Scripts:**
+- `train_with_transformers.py` (trains using the `transformers` library from hugging face)
+- `show_attention_map.py` (visualizes the attention map)
+- `evaluate_with_transformers.py` (for the metrics)
+
+#### Performance
+The wandb logger says:
+| Model | Accuracy | Loss | Runtime | Samples per second |
+|:----|:--------:|:----:|:-------:|:------------------:|
+| ViTForImageClassification |  0.93136 | 0.22247| 30.105 | 66.301 |
+
+*Note: it is trained starting from "google/vit-base-patch16-224-in21k"*
+
+#### Issues:
+- I am doing double preprocessing (albumentations + AutoImageProcessor)
+- evaluation code has some problem when loading the data which I do not understand (visualization works)
+
+#### Attention Maps
+| Correct Alignments | Wrong Alignments |
+|:--------:|:--------:|
+|![correct](repo_imgs/att_maps/correct.jpg)|![wrong](repo_imgs/att_maps/wrong.jpg)|
+|![correct](repo_imgs/att_maps/correct_2.jpg)|![wrong](repo_imgs/att_maps/wrong_2.jpg)|
+
+
+## Version 1 (11/07):
 - basic initialization (no tricks, not studied, no optimization, no masks, no spatial attention)
 - 25 epochs each (with early stopping, ResNet did not stop, HF stop after 19, ST after 12)
+- Transforms to perform on-the-fly data augmentation (random crop, flip, rotation)
+
+**Scripts:**
+- `train.py` (even the HF transformer model is trained using standard pytorch training loop)
+- `evaluate.py` (all can be evaluated using the same code)
+- `visualize.py` (show the results)
 
 Clear winner: **Transformer using HuggingFace Pretrained ViT**
+
+*Note: It is a transformer-based model using a pretrained feature extractor (from Google) with a classifier on top (sigmoid output layer).*
 
 Examples: 
 | Random 8 Images (Validation Set) | Random 8 Images (Validation Set) |
