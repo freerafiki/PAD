@@ -10,7 +10,7 @@ from utils.dataset_hf import ImageDataset, format_images_labels_list, collate_fn
                             training_transform, validation_transform
 
 # Initialize the model and processor
-model_name = "google/vit-base-patch16-384" #"google/vit-base-patch16-224-in21k"
+model_name = "google/vit-base-patch16-224-in21k"
 processor = AutoImageProcessor.from_pretrained(model_name)
 model = ViTForImageClassification.from_pretrained(model_name)
 
