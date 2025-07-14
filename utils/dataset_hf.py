@@ -41,9 +41,9 @@ def collate_fn(batch):
     }
 
 training_transform = A.Compose([
-    A.Resize(height=224, width=224),
+    A.Resize(height=384, width=384),
     #, interpolation=cv2.INTER_LINEAR, area_for_downscale="INTER_AREA", p=1.0),  # Use INTER_AREA when downscaling images),
-    A.RandomCrop(width=224, height=224),
+    A.RandomCrop(width=384, height=384),
     A.HorizontalFlip(p=0.5),
     A.Rotate(limit=180, p=0.5),
     A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.2),
@@ -58,9 +58,9 @@ def training_transforms(examples):
     return {"pixel_values": images}
 
 validation_transform = A.Compose([
-    A.Resize(height=224, width=224),
+    A.Resize(height=384, width=384),
     #, interpolation=cv2.INTER_LINEAR, area_for_downscale="INTER_AREA", p=1.0),  # Use INTER_AREA when downscaling images),
-    A.CenterCrop(width=224, height=224),
+    A.CenterCrop(width=384, height=384),
     A.ToTensorV2(),
 ])
 

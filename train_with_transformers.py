@@ -10,7 +10,7 @@ from utils.dataset_hf import ImageDataset, format_images_labels_list, collate_fn
                             training_transform, validation_transform
 
 # Initialize the model and processor
-model_name = "google/vit-base-patch16-224-in21k"
+model_name = "google/vit-base-patch16-384" #"google/vit-base-patch16-224-in21k"
 processor = AutoImageProcessor.from_pretrained(model_name)
 model = ViTForImageClassification.from_pretrained(model_name)
 
@@ -21,10 +21,10 @@ model.classifier = nn.Linear(model.config.hidden_size, num_classes)
 epochs = 15
 # Training arguments
 training_args = TrainingArguments(
-    output_dir="./results_aug",
+    output_dir="./results_384",
     num_train_epochs=epochs,
-    per_device_train_batch_size=64,
-    per_device_eval_batch_size=64,
+    per_device_train_batch_size=32,
+    per_device_eval_batch_size=32,
     evaluation_strategy="steps",
     eval_steps=100,
     # learning_rate=2e-4,

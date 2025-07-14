@@ -29,7 +29,7 @@ The wandb logger says:
 |:----|:--------:|:----:|:-------:|:------------------:|
 | ViTForImageClassification |  0.93136 | 0.22247| 30.105 | 66.301 |
 
-*Note: it is trained starting from "google/vit-base-patch16-224-in21k"*
+*Note: it is trained starting from "google/vit-base-patch16-224-in21k". I even started a training (1-2 epochs) using the large model, but the accuracy did not seem to be better (even lower). It could be that on the long run the large model is better, but I do not think so for this task and this dataset (you probably need more data). I see from the stats that also much more people seems to be using the base version on hf.*
 
 #### Issues:
 - I am doing double preprocessing (albumentations + AutoImageProcessor)
