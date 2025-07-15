@@ -3,7 +3,6 @@ from PIL import Image
 import torch
 import os
 import albumentations as A
-from albumentations import Compose, RandomCrop, HorizontalFlip, ColorJitter, Blur
 import numpy as np
 import cv2
 
@@ -40,32 +39,58 @@ def collate_fn(batch):
         'labels': torch.tensor([x['labels'] for x in batch])
     }
 
-training_transform = A.Compose([
-    A.Resize(height=384, width=384),
-    #, interpolation=cv2.INTER_LINEAR, area_for_downscale="INTER_AREA", p=1.0),  # Use INTER_AREA when downscaling images),
+training_transform_384 = A.Compose([
+    A.Resize(height=384, width=384, interpolation=cv2.INTER_AREA, area_for_downscale="image", p=1.0),  # Use INTER_AREA when downscaling images),
     A.RandomCrop(width=384, height=384),
     A.HorizontalFlip(p=0.5),
     A.Rotate(limit=180, p=0.5),
     A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.2),
     A.RandomBrightnessContrast(p=0.1),
     # A.Blur(blur_limit=(3, 7), p=0.1),
-    A.ImageCompression(quality_range=(50, 90), compression_type='jpeg', p=1.0),
+    A.ImageCompression(quality_range=(50, 90), compression_type='jpeg', p=0.25),
     A.ToTensorV2(),
 ])
 
-def training_transforms(examples):
-    images = [training_transform(image=np.array(image))["image"] for image in examples["image"]]
+training_transform_224 = A.Compose([
+    A.Resize(height=224, width=224, interpolation=cv2.INTER_AREA, area_for_downscale="image", p=1.0),  # Use INTER_AREA when downscaling images),
+    A.RandomCrop(width=224, height=224),
+    A.HorizontalFlip(p=0.5),
+    A.Rotate(limit=180, p=0.5),
+    A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.2),
+    A.RandomBrightnessContrast(p=0.1),
+    # A.Blur(blur_limit=(3, 7), p=0.1),
+    A.ImageCompression(quality_range=(50, 90), compression_type='jpeg', p=0.25),
+    A.ToTensorV2(),
+])
+
+def training_transforms(examples, size=224):
+    if size == 224:
+        images = [training_transform_224(image=np.array(image))["image"] for image in examples["image"]]
+    elif size == 384:
+        images = [training_transform_384(image=np.array(image))["image"] for image in examples["image"]]
+    else:
+        raise NotImplementedError()
     return {"pixel_values": images}
 
-validation_transform = A.Compose([
-    A.Resize(height=384, width=384),
-    #, interpolation=cv2.INTER_LINEAR, area_for_downscale="INTER_AREA", p=1.0),  # Use INTER_AREA when downscaling images),
+validation_transform_384 = A.Compose([
+    A.Resize(height=384, width=384, interpolation=cv2.INTER_AREA, area_for_downscale="image", p=1.0),  # Use INTER_AREA when downscaling images),
     A.CenterCrop(width=384, height=384),
     A.ToTensorV2(),
 ])
 
+validation_transform_224 = A.Compose([
+    A.Resize(height=224, width=224, interpolation=cv2.INTER_AREA, area_for_downscale="image", p=1.0),  # Use INTER_AREA when downscaling images),
+    A.CenterCrop(width=224, height=224),
+    A.ToTensorV2(),
+])
+
 def validation_transforms(examples):
-    images = [validation_transform(image=np.array(image))["image"] for image in examples["image"]]
+    if size == 224:
+        images = [validation_transform_224(image=np.array(image))["image"] for image in examples["image"]]
+    elif size == 384:
+        images = [validation_transform_384(image=np.array(image))["image"] for image in examples["image"]]
+    else:
+        raise NotImplementedError()
     return {"pixel_values": images}
 
 def format_images_labels_list(data_directory:str):
