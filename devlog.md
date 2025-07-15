@@ -30,7 +30,16 @@ Keeping track of the results of the quick attempts (using AI-enabled auto comple
 The test images are the images taken from the test set of the v2 version of the RePAIR dataset.
 Now we retrain the model on this smaller set of images.
 I decided to train the `v3_fast` model because a) it is fast and b) their attention maps look better and c) want to train for slighty longer as accuracy was still improving
+I re-introduced the *double processing* as I believe it works better, since we have more robustness on the images (now that the test set is hidden, and if we want to later be able to generalize to more pieces, rotation and so on. Trying to avoid overfitting on the small dataset).
 
+| Model | eval_loss  | eval_accuracy | eval_precision | eval_recall | eval_f1 | eval_runtime | eval_samples_per_second | eval_steps_per_second | 
+|:----|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| vit_v3_fast | 0.249  | 0.911 | 0.912 | 0.911 | 0.911 | 18.404 | 54.336 | 0.435 | 
+
+#### Attention Maps for `ViT v3 fast` model
+| Correct Alignments | Wrong Alignments |
+|:--------:|:--------:|
+|![correct](repo_imgs/att_maps/correct_attn_maps.jpg)|![wrong](repo_imgs/att_maps/wrong_attn_maps.jpg)|
 
 ## Version 3 (15/07):
 - Updated `transformers` library for experiments
