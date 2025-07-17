@@ -61,7 +61,11 @@ def main(args):
     )
 
     # Train the model
-    trainer.train() #resume_from_checkpoint="./results_vit_v3_fast/checkpoint-315")
+    if args.resume_from != "":
+        print("Resuming from", args.resume_from)
+        trainer.train(resume_from_checkpoint=args.resume_from)
+    else:
+        trainer.train() #resume_from_checkpoint="./results_vit_v3_fast/checkpoint-315")
 
     # Save the model
     # trainer.save_pretrained("./vit_hf_{epochs}epochs")
@@ -69,10 +73,10 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train a ViTForImageClassification model for binary classification')
-    parser.add_argument('--model_name', type=str, default="google/vit-base-patch16-224-in21k", help='ViT model name')  
-    parser.add_argument('--output_dir', type=str, default='./results_vit_base_224', help='output directory')  
-    parser.add_argument('--run_name', type=str, default='', help='naming the run for logging (otherwise takes output dir)')  
-    parser.add_argument('--resume_from', type=str, default='', help='resume from checkpoint')  
-    parser.add_argument('--epochs', type=int, default=15, help='number of epochs for training')  
+    parser.add_argument('--model_name', type=str, default="google/vit-base-patch16-224-in21k", help='ViT model name')
+    parser.add_argument('--output_dir', type=str, default='./results_vit_base_224', help='output directory')
+    parser.add_argument('--run_name', type=str, default='', help='naming the run for logging (otherwise takes output dir)')
+    parser.add_argument('--resume_from', type=str, default='', help='resume from checkpoint')
+    parser.add_argument('--epochs', type=int, default=15, help='number of epochs for training')
     args = parser.parse_args()
     main(args)

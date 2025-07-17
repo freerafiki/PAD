@@ -26,8 +26,8 @@ def visualize_attention_map(model, processor, image_path):
     with torch.no_grad():
         outputs = model(**inputs, output_attentions=True)
         attentions = outputs.attentions[-1]  # Last layer attention
-    
-    pred_class = torch.argmax(outputs['logits']).item()
+    pred_score = outputs['logits']
+    pred_class = torch.argmax(pred_score).item()
 
     # Process attention map
     attention_map = attentions.mean(dim=1)[:, 0, 1:]  # Average across heads, exclude CLS token
@@ -53,10 +53,12 @@ def visualize_attention_map(model, processor, image_path):
     
     reshaped = inputs['pixel_values'].squeeze(0).permute(1, 2, 0)
     
-    return reshaped, attention_map, pred_class
+    return reshaped, attention_map, pred_class, pred_score
 
  
 def main(args):
+    pred_class_labels = ['wrong', 'correct']
+
     # Usage
     results_to_show_from = "./results_vit_v3_fast"
     model = ViTForImageClassification.from_pretrained(results_to_show_from)
@@ -73,10 +75,10 @@ def main(args):
     plt.suptitle('Correct Examples')
     imgs_names = random.sample(os.listdir(correct_folder), num_imgs)
     for j, img_name in enumerate(imgs_names):
-        preprocessed_image, scaled_attention_map, pred_class = visualize_attention_map(model, processor, \
+        preprocessed_image, scaled_attention_map, pred_class, pred_score = visualize_attention_map(model, processor, \
                                                             os.path.join(correct_folder, img_name))
         plt.subplot(3, num_imgs, j+1)
-        plt.title(f"Preprocessed Image (classified as {pred_class})")
+        plt.title(f"Preprocessed Image (classified as {pred_class_labels[pred_class]})\nwrong: {pred_score[0][0].item()}\ncorrect: {pred_score[0][1].item()}")
         plt.imshow(preprocessed_image)
         plt.axis('off')
 
@@ -101,13 +103,13 @@ def main(args):
     
     wrong_folder = os.path.join(folder_name, 'wrong')
     plt.figure(figsize=(32, 24))
-    plt.suptitle('Correct Examples')
+    plt.suptitle('Wrong Examples')
     imgs_names = random.sample(os.listdir(wrong_folder), num_imgs)
     for j, img_name in enumerate(imgs_names):
-        preprocessed_image, scaled_attention_map, pred_class = visualize_attention_map(model, processor, \
+        preprocessed_image, scaled_attention_map, pred_class, pred_score = visualize_attention_map(model, processor, \
                                                             os.path.join(wrong_folder, img_name))
         plt.subplot(3, num_imgs, j+1)
-        plt.title(f"Preprocessed Image (classified as {pred_class})")
+        plt.title(f"Preprocessed Image (classified as {pred_class_labels[pred_class]})\nwrong: {pred_score[0][0].item()}\ncorrect: {pred_score[0][1].item()}")
         plt.imshow(preprocessed_image)
         plt.axis('off')
 
