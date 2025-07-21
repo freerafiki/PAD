@@ -2,7 +2,7 @@ import torch
 from PIL import Image
 import matplotlib.pyplot as plt
 import numpy as np
-from transformers import AutoImageProcessor, ViTForImageClassification
+from transformers import AutoImageProcessor, ViTForImageClassification, AutoModelForImageClassification
 import os, random
 import argparse 
 
@@ -18,7 +18,7 @@ def visualize_attention_map(model, processor, image_path):
     
     # Get patch size
     patch_size = processor.patch_size
-    num_of_patches = int(processor.image_size // processor.patch_size)
+    num_of_patches = 16 #int(processor.image_size // processor.patch_size)
     
     # breakpoint()
 
@@ -60,11 +60,13 @@ def main(args):
     pred_class_labels = ['wrong', 'correct']
 
     # Usage
-    results_to_show_from = "./results_vit_v3_fast"
+    results_to_show_from = args.path
     model = ViTForImageClassification.from_pretrained(results_to_show_from)
     processor = AutoImageProcessor.from_pretrained(
         os.path.join(results_to_show_from, "config.json"),
-        use_fast=True,
+        do_center_crop=True, 
+        crop_size={"height": args.size, "width": args.size},
+        use_fast = args.use_fast,
         trust_remote_code=True  # Required for local models
     )
     folder_name = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD/as_dataset/validation/'
@@ -136,5 +138,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Show/Save the attention maps from a trained model')
     parser.add_argument('--path', type=str, default="./results_vit_v3_fast", help='output folder of the trained model')  
     parser.add_argument('--save', type=str, default='', help='path for saving the images (folder) - if none, it will show them')  
+    parser.add_argument('--size', type=int, default=224, help='center_crop_size')
     args = parser.parse_args()
     main(args)

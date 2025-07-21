@@ -29,16 +29,16 @@ def main(args):
     data_directory = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD/as_dataset/'
     train_images, train_labels, val_images, val_labels = format_images_labels_list(data_directory)
 
+    processor = AutoImageProcessor.from_pretrained(os.path.join(results_to_show_from, "config.json"), do_center_crop=True, crop_size={"height": args.size, "width": args.size}, use_fast=True)
+    model = ViTForImageClassification.from_pretrained(results_to_show_from)
+
     # Usage
     results_to_show_from = args.path #"./results_vit_v3_fast"
     model = ViTForImageClassification.from_pretrained(results_to_show_from)
-    #     "results/checkpoint-2500/config.json",
-    #     trust_remote_code=True  # Required for local models
-    # 3)
-    # processor = AutoImageProcessor.from_pretrained(model_name)
-
     processor = AutoImageProcessor.from_pretrained(
         os.path.join(results_to_show_from, "config.json"),
+        do_center_crop=True, 
+        crop_size={"height": args.size, "width": args.size},
         use_fast = args.use_fast,
         trust_remote_code=True  # Required for local models
     )
@@ -50,10 +50,9 @@ def main(args):
     # Create minimal training arguments (you can customize these)
     eval_args = TrainingArguments(
         output_dir="./evaluations",
-        per_device_eval_batch_size=128,
+        per_device_eval_batch_size=64,
         eval_strategy="steps",
     )
-
 
     # Initialize trainer with your model and dataset
     trainer = Trainer(

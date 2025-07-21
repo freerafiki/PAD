@@ -26,9 +26,10 @@ class ImageDataset(Dataset):
         # Apply transforms
         if self.transform:
             augmented = self.transform(image=np.array(image))
-            image = augmented['image']
+            image = augmented['image'].to(torch.float)
 
         inputs = self.processor(images=image, return_tensors="pt")
+        # inputs['pixel_values'].to(torch.float)
         inputs['labels'] = torch.tensor(self.labels[idx])
         return inputs
 
@@ -48,6 +49,17 @@ training_transform_384 = A.Compose([
     A.RandomBrightnessContrast(p=0.1),
     # A.Blur(blur_limit=(3, 7), p=0.1),
     A.ImageCompression(quality_range=(50, 90), compression_type='jpeg', p=0.25),
+    A.ToTensorV2(),
+])
+
+training_transform_256 = A.Compose([
+    A.Resize(height=256, width=256, interpolation=cv2.INTER_AREA, area_for_downscale="image", p=1.0),  # Use INTER_AREA when downscaling images),
+    A.RandomCrop(width=256, height=256),
+    A.HorizontalFlip(p=0.5),
+    A.Rotate(limit=180, p=0.5),
+    A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1, p=0.05),
+    A.RandomBrightnessContrast(p=0.05),
+    A.ImageCompression(quality_range=(70, 90), compression_type='jpeg', p=0.05),
     A.ToTensorV2(),
 ])
 
