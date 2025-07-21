@@ -18,7 +18,7 @@ def visualize_attention_map(model, processor, image_path):
     
     # Get patch size
     patch_size = processor.patch_size
-    num_of_patches = 16 #int(processor.image_size // processor.patch_size)
+    num_of_patches = int(processor.image_size // processor.patch_size)
     
     # breakpoint()
 
@@ -66,7 +66,7 @@ def main(args):
         os.path.join(results_to_show_from, "config.json"),
         do_center_crop=True, 
         crop_size={"height": args.size, "width": args.size},
-        use_fast = args.use_fast,
+        use_fast = True,
         trust_remote_code=True  # Required for local models
     )
     folder_name = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD/as_dataset/validation/'
