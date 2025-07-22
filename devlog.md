@@ -49,6 +49,12 @@ Keeping track of the results of the quick attempts (using AI-enabled auto comple
 |:----|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | v4_fast_224 | 0.203  | 0.956 | 0.959 | 0.956 | 0.956 | 16.710 | 59.844 | 0.958 | 
 
+#### Attention Maps for `ViT v4 fast 224` model
+| Correct Alignments | Wrong Alignments |
+|:--------:|:--------:|
+|![correct](repo_imgs/att_maps/v4_correct_attn_maps.jpg)|![wrong](repo_imgs/att_maps/v4_wrong_attn_maps.jpg)|
+Interestingly, it seems not to be completely deterministic, as the two attention maps on the same scene look slightly different (see on the first two randomly chosen samples for *correct* alignments).
+
 ## Version 3.5
 - Changed dataset, now we have a test set and we use dataset v2, so less images for training 
 
