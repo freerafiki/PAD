@@ -29,6 +29,7 @@ def main(args):
     data_directory = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD/as_dataset/'
     train_images, train_labels, val_images, val_labels = format_images_labels_list(data_directory)
 
+    results_to_show_from = args.path
     processor = AutoImageProcessor.from_pretrained(os.path.join(results_to_show_from, "config.json"), do_center_crop=True, crop_size={"height": args.size, "width": args.size}, use_fast=True)
     model = ViTForImageClassification.from_pretrained(results_to_show_from)
 
@@ -39,7 +40,7 @@ def main(args):
         os.path.join(results_to_show_from, "config.json"),
         do_center_crop=True, 
         crop_size={"height": args.size, "width": args.size},
-        use_fast = args.use_fast,
+        use_fast = True,
         trust_remote_code=True  # Required for local models
     )
 
@@ -89,6 +90,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Show/Save the attention maps from a trained model')
     parser.add_argument('--path', type=str, default="./results_vit_v3_fast", help='output folder of the trained model')  
     parser.add_argument('--md', action="store_true", default=False, help='print metrics in markdown table style')  
-    parser.add_argument('--use_fast', action="store_true", default=False, help='use_fast processor')  
+    parser.add_argument('--size', type=int, default=224, help='center_crop_size')
+    # parser.add_argument('--use_fast', action="store_true", default=False, help='use_fast processor')  
     args = parser.parse_args()
     main(args)

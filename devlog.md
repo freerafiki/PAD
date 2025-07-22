@@ -3,8 +3,19 @@
 Keeping track of the results of the quick attempts (using AI-enabled auto completion for boilerplate code, so most likely full of terrible stuff, be aware) for **binary classification** (correct alignment / incorrect alignment) of pairwise alignments. After I get something *almost working*, will try to fix the code and make it usable and see how to get it into the solver.
 
 
-## Dataset 
-### v2
+# Dataset 
+### v3 (adding more *wrong* examples)
+```
+##############################
+# DATASET
+# total: 22632
+# train: 15645 (69.13%)
+# validation: 1737 (7.67%)
+# test: 5250 (23.20%)
+##############################
+```
+
+### v2 (creating test set)
 ```
 ##############################
 # DATASET
@@ -14,7 +25,7 @@ Keeping track of the results of the quick attempts (using AI-enabled auto comple
 # test: 2080 (20.85%)
 ##############################
 ```
-### v1
+### v1 (initial version)
 9977 images (80/20 train/val split)
 - Training:
     - 3991 correct
@@ -23,8 +34,22 @@ Keeping track of the results of the quick attempts (using AI-enabled auto comple
     - 998 correct
     - 998 wrong
 
+# Code & Models
 
-## Preparing for real evaluation
+## Version 4
+- New dataset with more "negative" examples
+- Improved pre-and post processing
+- Clarified ViT/AutoModel and so on
+- Tested dinov2-base and timm models (larger models, less accurate)
+- Tried zero-shot classification using VLM and prompts
+- Trained for 20 epochs
+
+#### Results
+| Model | eval_loss  | eval_accuracy | eval_precision | eval_recall | eval_f1 | eval_runtime | eval_samples_per_second | eval_steps_per_second | 
+|:----|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| v4_fast_224 | 0.203  | 0.956 | 0.959 | 0.956 | 0.956 | 16.710 | 59.844 | 0.958 | 
+
+## Version 3.5
 - Changed dataset, now we have a test set and we use dataset v2, so less images for training 
 
 The test images are the images taken from the test set of the v2 version of the RePAIR dataset.
