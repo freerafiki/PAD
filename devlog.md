@@ -54,9 +54,9 @@ The model was trained on PADv3, but evaluation was to check how much we *overfit
 It seems *worse* than v4 actually, but the hope is that the model is *better* than the original dataset (since we improved by putting *harder* examples and we remove some wrongly labeled images). Not sure if this makes complete sense though. 
 
 #### Attention Maps for `ViT v5 fast 224` model
-| Correct Alignments | Wrong Alignments | Handmade Wrong Alignments |
+| Correct Alignments | Wrong Alignments | *Hard* Wrong Alignments |
 |:--------:|:--------:|:--------:|
-|![correct](repo_imgs/att_maps/v5/correct_attn_maps.jpg)|![wrong](repo_imgs/att_maps/v5/wrong_attn_maps.jpg)|![handmade wrong](repo_imgs/att_maps/v5/handmade_wrong_attn_maps.jpg)|
+|![correct](repo_imgs/att_maps/v5/correct_attn_maps.jpg)|![wrong](repo_imgs/att_maps/v5/wrong_attn_maps.jpg)|![hard negatives](repo_imgs/att_maps/v5/handmade_wrong_attn_maps.jpg)|
 
 These look actually very good, following *reasonable* parts of the image. 
 
