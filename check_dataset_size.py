@@ -1,6 +1,6 @@
 import os 
 
-source_directory = "/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v2/as_dataset"
+source_directory = "/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v3/as_dataset"
 train_directory = os.path.join(source_directory,"train")
 val_directory = os.path.join(source_directory,"validation")
 test_directory = os.path.join(source_directory,"test")

@@ -26,7 +26,7 @@ def compute_metrics_sk(p: EvalPrediction):
     }
 
 def main(args):
-    data_directory = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD/as_dataset/'
+    data_directory = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v3/as_dataset/'
     train_images, train_labels, val_images, val_labels = format_images_labels_list(data_directory)
 
     results_to_show_from = args.path

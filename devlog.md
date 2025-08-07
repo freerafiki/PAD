@@ -36,6 +36,30 @@ Keeping track of the results of the quick attempts (using AI-enabled auto comple
 
 # Code & Models
 
+## Version 5
+- New dataset
+    - with more "hard negative" examples
+    - removed false positive
+- Trained for 20 epochs
+
+#### Results
+
+| Model | PAD | eval_loss  | eval_accuracy | eval_precision | eval_recall | eval_f1 | eval_runtime | eval_samples_per_second | eval_steps_per_second | 
+|:----|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| v5_fast_224 | v1 | 0.407 | 0.918 | 0.927 | 0.918 | 0.918 | 20.666 | 48.389 | 0.774 | 
+| v5_fast_224 | v2 | 0.226 | 0.948 | 0.947 | 0.948 | 0.947 | 30.073 | 57.760 | 0.931 |
+| v5_fast_224 | v3 | 0.165 | 0.959 | 0.959 | 0.959 | 0.959 | 35.213 | 51.629 | 0.824 |
+
+The model was trained on PADv3, but evaluation was to check how much we *overfit* the v3 dataset (of course there is a large overlap between PAD versions, since they are just improvements)
+It seems *worse* than v4 actually, but the hope is that the model is *better* than the original dataset (since we improved by putting *harder* examples and we remove some wrongly labeled images). Not sure if this makes complete sense though. 
+
+#### Attention Maps for `ViT v5 fast 224` model
+| Correct Alignments | Wrong Alignments | Handmade Wrong Alignments |
+|:--------:|:--------:|:--------:|
+|![correct](repo_imgs/att_maps/v5/correct_attn_maps.jpg)|![wrong](repo_imgs/att_maps/v5/wrong_attn_maps.jpg)|![handmade wrong](repo_imgs/att_maps/v5/handmade_wrong_attn_maps.jpg)|
+
+These look actually very good, following *reasonable* parts of the image. 
+
 ## Version 4
 - New dataset with more "negative" examples
 - Improved pre-and post processing
@@ -45,9 +69,13 @@ Keeping track of the results of the quick attempts (using AI-enabled auto comple
 - Trained for 20 epochs
 
 #### Results
-| Model | eval_loss  | eval_accuracy | eval_precision | eval_recall | eval_f1 | eval_runtime | eval_samples_per_second | eval_steps_per_second | 
-|:----|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| v4_fast_224 | 0.203  | 0.956 | 0.959 | 0.956 | 0.956 | 16.710 | 59.844 | 0.958 | 
+| Model | PAD | eval_loss  | eval_accuracy | eval_precision | eval_recall | eval_f1 | eval_runtime | eval_samples_per_second | eval_steps_per_second | 
+|:----|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| v4_fast_224 | v1 | 0.203 | 0.956 | 0.959 | 0.956 | 0.956 | 18.410 | 54.319 | 0.869 | 
+| v4_fast_224 | v2 | 0.165 | 0.960 | 0.960 | 0.960 | 0.960 | 32.820 | 52.925 | 0.853 |
+| v4_fast_224 | v3 | 0.156 | 0.963 | 0.963 | 0.963 | 0.963 | 36.061 | 50.414 | 0.804 |
+
+This model was trained on PADv2 but it seems to perform good on all the versions of the dataset.
 
 #### Attention Maps for `ViT v4 fast 224` model
 | Correct Alignments | Wrong Alignments |

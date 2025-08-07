@@ -46,7 +46,7 @@ def main(args):
         save_on_each_node=True
     )
 
-    data_directory = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v2/as_dataset/'
+    data_directory = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v3/as_dataset/'
     train_images, train_labels, val_images, val_labels = format_images_labels_list(data_directory)
 
     # Create datasets
