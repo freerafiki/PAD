@@ -1,6 +1,8 @@
 # Results
 
-Keeping track of the results of the quick attempts (using AI-enabled auto completion for boilerplate code, so most likely full of terrible stuff, be aware) for **binary classification** (correct alignment / incorrect alignment) of pairwise alignments. After I get something *almost working*, will try to fix the code and make it usable and see how to get it into the solver.
+Devlog for the implementation of various models to discriminate correct alignemnts of irregular fragments (with pictorial contents/color).
+
+Keeping track of the results of the quick attempts for **binary classification** (correct alignment / incorrect alignment) of pairwise alignments and the later more refined versions.
 
 
 # Dataset 
