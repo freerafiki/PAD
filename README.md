@@ -59,5 +59,8 @@ Quickly some numbers if you are curious:
 | Correct Alignments | Wrong Alignments |
 |:--------:|:--------:|
 |![correct](repo_imgs/att_maps/v4_correct_attn_maps.jpg)|![wrong](repo_imgs/att_maps/v4_wrong_attn_maps.jpg)|
-Interestingly, it seems not to be completely deterministic, as the two attention maps on the same scene look slightly different (see on the first two randomly chosen samples for *correct* alignments).
+
+Interestingly, it seems not to be completely deterministic, as the two attention maps on the same scene look slightly different (see on the first two randomly chosen samples for *correct* alignments). 
+
+Mostly in the *wrong* alignments, we can actually see the heatmap highlighting (in red) areas which are responsible for the *wrongness* (usually the pictorial content is not continued on the other fragment).
 
