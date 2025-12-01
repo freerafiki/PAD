@@ -162,3 +162,14 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# images
+puzzle_***.png
+
+.zed
+
+_evaluation/
+_resnet_pytorch/
+_vit_hf
+_vit_pytorch
+wandb/
+checkpoints/
