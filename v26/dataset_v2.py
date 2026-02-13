@@ -88,6 +88,145 @@ class PrecomposedAlignmentDataset(Dataset):
         # Get the positive sample
         pos_sample = self.positive_samples[idx]
 
+        # Sample negatives (same as before)
+        n_hard = self.negatives_per_positive // 2
+        n_easy = self.negatives_per_positive - n_hard
+
+        selected_negatives = []
+
+        if len(self.hard_negative_samples) > 0:
+            n_hard = min(n_hard, len(self.hard_negative_samples))
+            hard_indices = np.random.choice(len(self.hard_negative_samples),
+                                        size=n_hard,
+                                        replace=False)
+            selected_negatives.extend([self.hard_negative_samples[i] for i in hard_indices])
+
+        if len(self.negative_samples) > 0:
+            n_easy = min(n_easy, len(self.negative_samples))
+            easy_indices = np.random.choice(len(self.negative_samples),
+                                        size=n_easy,
+                                        replace=False)
+            selected_negatives.extend([self.negative_samples[i] for i in easy_indices])
+
+        # Combine positive + negatives
+        all_samples = [pos_sample] + selected_negatives
+
+        original_positions = list(range(len(all_samples)))  # [0, 1, 2, 3, ...]
+
+        # # DEBUG: Print before shuffle
+        # print(f"\n=== Dataset[{idx}] BEFORE shuffle ===")
+        # print(f"Number of samples: {len(all_samples)}")
+        # print(f"Labels before: {[s['label'] for s in all_samples]}")
+        # print(f"Positions before: {original_positions}")
+
+        # CORRECT:
+        shuffle_indices = np.random.permutation(len(all_samples))
+        all_samples = [all_samples[i] for i in shuffle_indices]
+        # DON'T shuffle original_positions! Just assign the indices themselves:
+        original_positions = shuffle_indices.tolist()  # These ARE the original positions
+
+        # # DEBUG: Print after shuffle
+        # print(f"Labels after: {[s['label'] for s in all_samples]}")
+        # print(f"Positions after: {original_positions}")
+        # print(f"Positive is now at index: {[s['label'] for s in all_samples].index(1.0)}")
+
+        # Process each sample
+        batch = {
+            'rgb': [],
+            'rgb_geometric': [],
+            'labels': [],
+            'difficulties': [],
+            'positions': []  # *** NEW: track position in batch ***
+        }
+
+        for sample, pos in zip(all_samples, original_positions):
+            rgb, rgb_geom = self._process_sample(sample)
+
+            batch['rgb'].append(rgb)
+            batch['rgb_geometric'].append(rgb_geom)
+            batch['labels'].append(sample['label'])
+            batch['difficulties'].append(sample['category'])
+            batch['positions'].append(pos)  # *** NEW ***
+
+        # Stack into tensors
+        return {
+            'rgb': torch.stack(batch['rgb']),
+            'rgb_geometric': torch.stack(batch['rgb_geometric']),
+            'labels': torch.tensor(batch['labels'], dtype=torch.float32),
+            'difficulties': batch['difficulties'],
+            'positions': batch['positions']  # *** NEW: list of ints ***
+        }
+
+    def __getitem__v2(self, idx):
+        """
+        Returns a dict containing:
+        - Multiple samples (1 positive + several negatives)
+        - Each sample has: rgb, rgb_geometric, label, difficulty
+        """
+        # Get the positive sample
+        pos_sample = self.positive_samples[idx]
+
+        # Sample negatives (same as before)
+        n_hard = self.negatives_per_positive // 2
+        n_easy = self.negatives_per_positive - n_hard
+
+        selected_negatives = []
+
+        if len(self.hard_negative_samples) > 0:
+            n_hard = min(n_hard, len(self.hard_negative_samples))
+            hard_indices = np.random.choice(len(self.hard_negative_samples),
+                                            size=n_hard,
+                                            replace=False)
+            selected_negatives.extend([self.hard_negative_samples[i] for i in hard_indices])
+
+        if len(self.negative_samples) > 0:
+            n_easy = min(n_easy, len(self.negative_samples))
+            easy_indices = np.random.choice(len(self.negative_samples),
+                                            size=n_easy,
+                                            replace=False)
+            selected_negatives.extend([self.negative_samples[i] for i in easy_indices])
+
+        # Combine positive + negatives
+        all_samples = [pos_sample] + selected_negatives
+
+        # *** NEW: SHUFFLE THE ORDER ***
+        # Keep track of which was positive
+        shuffle_indices = np.random.permutation(len(all_samples))
+        all_samples = [all_samples[i] for i in shuffle_indices]
+
+        # Process each sample
+        batch = {
+            'rgb': [],
+            'rgb_geometric': [],
+            'labels': [],
+            'difficulties': []
+        }
+
+        for sample in all_samples:
+            rgb, rgb_geom = self._process_sample(sample)
+
+            batch['rgb'].append(rgb)
+            batch['rgb_geometric'].append(rgb_geom)
+            batch['labels'].append(sample['label'])
+            batch['difficulties'].append(sample['category'])
+
+        # Stack into tensors
+        return {
+            'rgb': torch.stack(batch['rgb']),
+            'rgb_geometric': torch.stack(batch['rgb_geometric']),
+            'labels': torch.tensor(batch['labels'], dtype=torch.float32),
+            'difficulties': batch['difficulties']
+        }
+
+    def __getitem__v1(self, idx):
+        """
+        Returns a dict containing:
+        - Multiple samples (1 positive + several negatives)
+        - Each sample has: rgb, rgb_geometric, label, difficulty
+        """
+        # Get the positive sample
+        pos_sample = self.positive_samples[idx]
+
         # Sample negatives
         # Mix of hard and easy negatives
         n_hard = self.negatives_per_positive // 2
@@ -473,6 +612,24 @@ class PrecomposedAlignmentDataset(Dataset):
 
 # Custom collate function for DataLoader
 def collate_alignment_samples(batch_list):
+    """
+    Collate function to handle variable-length batches.
+    """
+    rgb = torch.cat([item['rgb'] for item in batch_list], dim=0)
+    rgb_geometric = torch.cat([item['rgb_geometric'] for item in batch_list], dim=0)
+    labels = torch.cat([item['labels'] for item in batch_list], dim=0)
+    difficulties = [d for item in batch_list for d in item['difficulties']]
+    positions = [p for item in batch_list for p in item['positions']]  # *** NEW ***
+
+    return {
+        'rgb': rgb,
+        'rgb_geometric': rgb_geometric,
+        'labels': labels,
+        'difficulties': difficulties,
+        'positions': positions  # *** NEW ***
+    }
+
+def collate_alignment_samples_v1(batch_list):
     """
     Collate function to handle variable-length batches.
 

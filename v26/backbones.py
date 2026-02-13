@@ -1,3 +1,7 @@
+import torch
+import torch.nn as nn
+from transformers import ViTModel
+
 """
 # This version projects the geometric + RGB information (6 channels)
 # into 3 channels
@@ -18,7 +22,7 @@ class ProjectionViT(nn.Module):
         super().__init__()
         self.projection = nn.Conv2d(6, 3, kernel_size=1)
         self.vit = ViTModel.from_pretrained(pretrained_name)
-    
+
     def forward(self, x):
         # x: (B, 6, H, W)
         x_3ch = self.projection(x)  # (B, 3, H, W)
@@ -42,10 +46,10 @@ class ModifiedViT(nn.Module):
     def __init__(self, pretrained_name='google/vit-base-patch16-224'):
         super().__init__()
         self.vit = ViTModel.from_pretrained(pretrained_name)
-        
+
         # Get original patch embedding
         original_proj = self.vit.embeddings.patch_embeddings.projection
-        
+
         # Create new one with 6 input channels
         self.vit.embeddings.patch_embeddings.projection = nn.Conv2d(
             in_channels=6,
@@ -53,13 +57,13 @@ class ModifiedViT(nn.Module):
             kernel_size=original_proj.kernel_size,     # (16, 16)
             stride=original_proj.stride                # (16, 16)
         )
-        
+
         # Initialize: copy RGB weights, random for geometric channels
         with torch.no_grad():
             new_weight = self.vit.embeddings.patch_embeddings.projection.weight
             new_weight[:, :3, :, :] = original_proj.weight.data
             # Channels 3-5 stay randomly initialized
-    
+
     def forward(self, x):
         # x: (B, 6, H, W)
         outputs = self.vit(x)
