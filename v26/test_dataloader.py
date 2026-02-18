@@ -16,6 +16,7 @@ dataloader = DataLoader(
     dataset,
     batch_size=4,  # 4 positives, each with 6 negatives = 28 total samples per batch
     shuffle=True,
+    sampler=ShuffledBatchSampler(dataset, shuffle=True, seed=42),  # *** NEW ***
     collate_fn=collate_alignment_samples,
     num_workers=4
 )

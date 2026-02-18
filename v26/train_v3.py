@@ -8,7 +8,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 # Import your dataset and models
-from dataset_v3 import PrecomposedAlignmentDataset, collate_alignment_samples
+from dataset_v3 import PrecomposedAlignmentDataset, collate_alignment_samples, ShuffledBatchSampler
 from models import BaselineScorer, GeometricScorer, MultiModalScorer
 from loss_v2 import RankingLoss
 
@@ -163,9 +163,10 @@ def train_model(
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
+        sampler=ShuffledBatchSampler(train_dataset, shuffle=True, seed=42),  # *** NEW ***
         collate_fn=collate_alignment_samples,
-        num_workers=0,
+        num_workers=8,
         pin_memory=True
     )
 
@@ -173,6 +174,7 @@ def train_model(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
+        sampler=ShuffledBatchSampler(val_dataset, shuffle=True, seed=42),  # *** NEW ***
         collate_fn=collate_alignment_samples,
         num_workers=4,
         pin_memory=True
@@ -365,6 +367,9 @@ def main():
     RADIUS = 30
     THRESHOLD = 30
 
+    # DINO PARAMETERS
+    DINO_MODEL = 'facebook/dinov2-base'
+
     print(f"Using device: {DEVICE}")
 
     # Load full dataset
@@ -373,8 +378,7 @@ def main():
         negatives_per_positive=NEGATIVES_PER_POSITIVE,
         hard_negative_ratio=0.6,
         radius = RADIUS,
-        threshold = THRESHOLD,
-        extract_dino = True
+        threshold = THRESHOLD
     )
 
     # *** CHANGED: Split by puzzles, not random ***
@@ -439,7 +443,7 @@ def main():
     print("TRAINING VERSION 3: RGB + Geometry + DINO")
     print("="*60)
 
-    model_v3 = MultiModalScorer()
+    model_v3 = MultiModalScorer(dino_model=DINO_MODEL)
     model_v3, history_v3 = train_model(
         model_v3,
         train_dataset,

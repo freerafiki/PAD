@@ -13,8 +13,9 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import argparse
 from PIL import Image
+from sklearn.decomposition import PCA
 
-from dataset_v3 import PrecomposedAlignmentDataset, collate_alignment_samples
+from dataset_v3 import PrecomposedAlignmentDataset, collate_alignment_samples, ShuffledBatchSampler
 from models import BaselineScorer, GeometricScorer, MultiModalScorer
 from torch.utils.data import DataLoader
 
@@ -106,9 +107,74 @@ def extract_attention_maps(model, rgb, rgb_geometric):
 
     return None
 
-def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geometric'):
+
+def extract_dino_features(model, rgb):
+    """
+    Extract DINO features from the multimodal model.
+
+    Args:
+        model: MultiModalScorer model with DINO branch
+        rgb: (B, 3, H, W) RGB input
+
+    Returns:
+        feature_maps: List of (H, W, 3) numpy arrays for visualization
+    """
+    model.eval()
+    with torch.no_grad():
+        # Get DINO outputs with hidden states
+        dino_output = model.dino(rgb, output_hidden_states=True)
+        
+        # Get the last hidden state: (B, num_patches + 1, hidden_dim)
+        # num_patches = (224/16)^2 = 196 for vit-base-patch16-224
+        hidden_states = dino_output.last_hidden_state
+        
+        # Remove CLS token, keep only patch tokens
+        patch_tokens = hidden_states[:, 1:, :]  # (B, num_patches, hidden_dim)
+        
+        feature_maps = []
+        for i in range(patch_tokens.shape[0]):
+            # Get patch tokens for this image
+            tokens = patch_tokens[i].cpu().numpy()  # (num_patches, hidden_dim)
+            
+            # Reshape to spatial grid (14x14 for 224x224 image with patch size 16)
+            num_patches = tokens.shape[0]
+            grid_size = int(np.sqrt(num_patches))
+            
+            if grid_size * grid_size != num_patches:
+                # Fallback: just use PCA on all tokens
+                grid_size = int(np.ceil(np.sqrt(num_patches)))
+            
+            # Use PCA to reduce to 3 components for RGB visualization
+            pca = PCA(n_components=3)
+            features_3d = pca.fit_transform(tokens)  # (num_patches, 3)
+            
+            # Normalize to [0, 1]
+            features_3d = (features_3d - features_3d.min()) / (features_3d.max() - features_3d.min() + 1e-8)
+            
+            # Reshape to grid
+            feature_map = features_3d.reshape(grid_size, grid_size, 3)
+            
+            # Upsample to match image size for better visualization
+            feature_map_pil = Image.fromarray((feature_map * 255).astype(np.uint8))
+            feature_map_upsampled = feature_map_pil.resize((224, 224), Image.BILINEAR)
+            feature_map_np = np.array(feature_map_upsampled) / 255.0
+            
+            feature_maps.append(feature_map_np)
+    
+    return feature_maps
+
+def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geometric', threshold=0.5):
     """
     Visualize predictions for one batch.
+    
+    Args:
+        model: Trained model
+        batch: Batch from dataloader
+        device: 'cuda' or 'cpu'
+        save_dir: Directory to save visualizations
+        batch_idx: Batch index for naming files
+        model_type: Type of model for inference
+        threshold: Threshold for determining if inference was successful (default: 0.5)
     """
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
@@ -118,6 +184,11 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
     labels = batch['labels'].cpu().numpy()
     difficulties = batch['difficulties']
     positions = batch['positions']  # *** NEW ***
+
+    # Extract DINO features if using multimodal model
+    dino_features = None
+    if model_type == 'multimodal':
+        dino_features = extract_dino_features(model, rgb)
 
     # Get predictions
     with torch.no_grad():
@@ -151,12 +222,21 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
         group_labels = labels[list(group_indices)]
         group_difficulties = [difficulties[i] for i in group_indices]
         group_positions = [positions[i] for i in group_indices]  # *** NEW ***
+        
+        # Extract DINO features for this group if available
+        group_dino_features = None
+        if dino_features is not None:
+            group_dino_features = [dino_features[i] for i in group_indices]
 
         # Rank by score (descending)
         rank_order = np.argsort(-group_scores)
 
         # Check if positive is ranked first
         is_correct = (group_labels[rank_order[0]] == 1.0)
+        
+        # Get the best score and check if it exceeds threshold
+        best_score = group_scores[rank_order[0]]
+        is_accepted = best_score >= threshold
 
         # *** CORRECT CHECK: Where is the positive in THIS group? ***
         positive_idx_in_group = np.where(group_labels == 1.0)[0][0]  # Index within this group
@@ -166,9 +246,11 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
         # The index itself tells us if shuffling worked
         shuffling_worked = True  # We can see from positive_idx_in_group varying
 
-        # Create visualization
-        fig = plt.figure(figsize=(20, 12))
-        gs = fig.add_gridspec(2, group_size, hspace=0.3, wspace=0.2)
+        # Create visualization - 3 rows if multimodal (with DINO), 2 rows otherwise
+        num_rows = 3 if model_type == 'multimodal' else 2
+        fig_height = 16 if model_type == 'multimodal' else 12
+        fig = plt.figure(figsize=(20, fig_height))
+        gs = fig.add_gridspec(num_rows, group_size, hspace=0.3, wspace=0.2)
 
         for i, rank_idx in enumerate(rank_order):
             actual_idx = rank_idx
@@ -193,8 +275,16 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
             )
             ax_rgb.axis('off')
 
-            # Row 3: Contact region (channel 5)
-            ax_contact = fig.add_subplot(gs[1, i])
+            # Row 1: DINO features (only if multimodal)
+            if model_type == 'multimodal' and group_dino_features is not None:
+                ax_dino = fig.add_subplot(gs[1, i])
+                dino_feat = group_dino_features[actual_idx]
+                im_dino = ax_dino.imshow(dino_feat)
+                ax_dino.set_title('DINO Features (PCA)', fontsize=8)
+                ax_dino.axis('off')
+
+            # Last row: Contact region (channel 5)
+            ax_contact = fig.add_subplot(gs[num_rows - 1, i])
             contact = group_rgb_geom[actual_idx][5].cpu().numpy()
             im_contact = ax_contact.imshow(contact, cmap='hot', vmin=0, vmax=1)
             ax_contact.set_title(f'Contact (max={contact.max():.2f})', fontsize=8)
@@ -204,14 +294,24 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
         fig.colorbar(im_contact, ax=ax_contact,
                     orientation='horizontal', pad=0.05, fraction=0.05)
 
-        # Overall title with shuffling info
+        # Overall title with shuffling info and threshold status
         correct_text = "✓ CORRECT" if is_correct else "✗ INCORRECT"
         correct_color = 'green' if is_correct else 'red'
+        
+        # Threshold acceptance status
+        if is_accepted:
+            accepted_text = f"✓ ACCEPTED (score: {best_score:.2f} >= threshold: {threshold:.2f})"
+            accepted_color = 'green'
+        else:
+            accepted_text = f"✗ REJECTED (best score: {best_score:.2f} < threshold: {threshold:.2f})"
+            accepted_color = 'red'
+        
         shuffle_text = "✓ Shuffled" if shuffling_worked else "⚠ NOT shuffled (pos always at 0)"  # *** NEW ***
 
         # Update title to show the INDEX, not the original position
+        model_info = " [with DINO features]" if model_type == 'multimodal' else ""
         fig.suptitle(
-            f"Batch {batch_idx}, Group {group_idx+1} | {correct_text}\n"
+            f"Batch {batch_idx}, Group {group_idx+1} | {correct_text} | {accepted_text}{model_info}\n"
             f"Positive is at index {positive_idx_in_group}/{group_size-1} in this group "
             f"(came from pre-shuffle position {positive_original_position})",
             fontsize=14,
@@ -468,7 +568,7 @@ def visualize_score_distribution(model, dataloader, device, save_dir, model_type
     print(stats_text)
 
 
-def analyze_failures(model, dataloader, device, save_dir, model_type='geometric', max_failures=20):
+def analyze_failures(model, dataloader, device, save_dir, model_type='geometric', max_failures=20, threshold=0.5):
     """
     Find and visualize failure cases (where positive is not ranked first).
 
@@ -479,6 +579,7 @@ def analyze_failures(model, dataloader, device, save_dir, model_type='geometric'
         save_dir: Directory to save visualizations
         model_type: Type of model
         max_failures: Maximum number of failures to visualize
+        threshold: Threshold for determining if inference was successful
     """
     save_dir = Path(save_dir)
     failure_dir = save_dir / 'failures'
@@ -536,7 +637,8 @@ def analyze_failures(model, dataloader, device, save_dir, model_type='geometric'
                         device,
                         failure_dir,
                         batch_idx=failures_found,
-                        model_type=model_type
+                        model_type=model_type,
+                        threshold=threshold
                     )
                     failures_found += 1
 
@@ -584,7 +686,8 @@ def main(args):
             device,
             output_dir,
             batch_idx=batch_idx,
-            model_type=args.model_type
+            model_type=args.model_type,
+            threshold=args.threshold
         )
 
     # Score distribution
@@ -607,7 +710,8 @@ def main(args):
             device,
             output_dir,
             model_type=args.model_type,
-            max_failures=20
+            max_failures=20,
+            threshold=args.threshold
         )
 
     print(f"\nDone! Visualizations saved to {output_dir}")
@@ -625,6 +729,8 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', type=str, default='./visualizations', help='Output directory')
     parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'])
     parser.add_argument('--analyze_failures', action='store_true', help='Find and visualize failures')
+    parser.add_argument('--threshold', type=float, default=0.5,
+                        help='Threshold for determining if inference was successful (default: 0.5)')
 
     args = parser.parse_args()
     main(args)
