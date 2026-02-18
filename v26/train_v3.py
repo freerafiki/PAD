@@ -8,7 +8,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 # Import your dataset and models
-from dataset_v2 import PrecomposedAlignmentDataset, collate_alignment_samples
+from dataset_v3 import PrecomposedAlignmentDataset, collate_alignment_samples
 from models import BaselineScorer, GeometricScorer, MultiModalScorer
 from loss_v2 import RankingLoss
 
@@ -138,7 +138,7 @@ def train_model(
     batch_size=32,
     lr=1e-4,
     device='cuda',
-    save_dir='checkpoints',
+    save_dir='checkpoints/run3_v3',
     model_name='model'
 ):
     """
@@ -165,7 +165,7 @@ def train_model(
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_alignment_samples,
-        num_workers=4,
+        num_workers=0,
         pin_memory=True
     )
 
@@ -354,92 +354,110 @@ def main():
     """Main training script."""
 
     # Configuration
-    DATA_ROOT = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4'  # Your data directory
-    BATCH_SIZE = 16        # Number of puzzle groups per batch
-    NUM_EPOCHS = 25
+    DATA_ROOT = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4'
+    BATCH_SIZE = 16
+    NUM_EPOCHS = 5
     LEARNING_RATE = 1e-4
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    NEGATIVES_PER_POSITIVE = 6  # Sample 6 negatives per positive
+    NEGATIVES_PER_POSITIVE = 4  # Adjusted for your data size
+
+    # DATASET PARAMETERS
+    RADIUS = 30
+    THRESHOLD = 30
 
     print(f"Using device: {DEVICE}")
 
     # Load full dataset
     full_dataset = PrecomposedAlignmentDataset(
         data_root=DATA_ROOT,
-        negatives_per_positive=NEGATIVES_PER_POSITIVE
+        negatives_per_positive=NEGATIVES_PER_POSITIVE,
+        hard_negative_ratio=0.6,
+        radius = RADIUS,
+        threshold = THRESHOLD,
+        extract_dino = True
     )
 
-    # Split into train/val (80/20)z
-    total_size = len(full_dataset)
-    train_size = int(0.8 * total_size)
-    val_size = total_size - train_size
-
-    train_dataset, val_dataset = random_split(
+    # *** CHANGED: Split by puzzles, not random ***
+    train_dataset, val_dataset = PrecomposedAlignmentDataset.create_puzzle_split(
         full_dataset,
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
+        radius = RADIUS,
+        threshold = THRESHOLD,
+        train_ratio=0.8,
+        seed=42
     )
 
-    print(f"Dataset split: {train_size} train, {val_size} val")
+    print(f"\n=== Dataset Ready ===")
+    print(f"Train: {len(train_dataset)} pairs")
+    print(f"Val: {len(val_dataset)} pairs")
 
-    # Train Version 1: Baseline (RGB only)
-    print("\n" + "="*60)
-    print("TRAINING VERSION 1: Baseline (RGB only)")
-    print("="*60)
+    # Verify no overlap
+    train_puzzles = set(k.split('|')[0] for k in train_dataset.pair_keys)
+    val_puzzles = set(k.split('|')[0] for k in val_dataset.pair_keys)
+    overlap = train_puzzles & val_puzzles
 
-    model_v1 = BaselineScorer()
-    model_v1, history_v1 = train_model(
-        model_v1,
-        train_dataset,
-        val_dataset,
-        num_epochs=NUM_EPOCHS,
-        batch_size=BATCH_SIZE,
-        lr=LEARNING_RATE,
-        device=DEVICE,
-        model_name='baseline'
-    )
+    if overlap:
+        print(f"⚠️  WARNING: {len(overlap)} puzzles appear in both train and val!")
+    else:
+        print("✓ No puzzle overlap between train and val")
 
-    # Train Version 2: + Geometry
-    print("\n" + "="*60)
-    print("TRAINING VERSION 2: RGB + Geometry")
-    print("="*60)
-
-    model_v2 = GeometricScorer()
-    model_v2, history_v2 = train_model(
-        model_v2,
-        train_dataset,
-        val_dataset,
-        num_epochs=NUM_EPOCHS,
-        batch_size=BATCH_SIZE,
-        lr=LEARNING_RATE,
-        device=DEVICE,
-        model_name='geometric'
-    )
-
-    # # Train Version 3: + DINO
+    # # Train Version 1: Baseline (RGB only)
     # print("\n" + "="*60)
-    # print("TRAINING VERSION 3: RGB + Geometry + DINO")
+    # print("TRAINING VERSION 1: Baseline (RGB only)")
     # print("="*60)
 
-    # model_v3 = MultiModalScorer()
-    # model_v3, history_v3 = train_model(
-    #     model_v3,
+    # model_v1 = BaselineScorer()
+    # model_v1, history_v1 = train_model(
+    #     model_v1,
     #     train_dataset,
     #     val_dataset,
     #     num_epochs=NUM_EPOCHS,
     #     batch_size=BATCH_SIZE,
     #     lr=LEARNING_RATE,
     #     device=DEVICE,
-    #     model_name='multimodal'
+    #     model_name='baseline'
     # )
+
+    # # Train Version 2: + Geometry
+    # print("\n" + "="*60)
+    # print("TRAINING VERSION 2: RGB + Geometry")
+    # print("="*60)
+
+    # model_v2 = GeometricScorer()
+    # model_v2, history_v2 = train_model(
+    #     model_v2,
+    #     train_dataset,
+    #     val_dataset,
+    #     num_epochs=NUM_EPOCHS,
+    #     batch_size=BATCH_SIZE,
+    #     lr=LEARNING_RATE,
+    #     device=DEVICE,
+    #     model_name='geometric'
+    # )
+
+    # Train Version 3: + DINO
+    print("\n" + "="*60)
+    print("TRAINING VERSION 3: RGB + Geometry + DINO")
+    print("="*60)
+
+    model_v3 = MultiModalScorer()
+    model_v3, history_v3 = train_model(
+        model_v3,
+        train_dataset,
+        val_dataset,
+        num_epochs=NUM_EPOCHS,
+        batch_size=BATCH_SIZE,
+        lr=LEARNING_RATE,
+        device=DEVICE,
+        model_name='multimodal'
+    )
 
     # Compare results
     print("\n" + "="*60)
     print("FINAL COMPARISON")
     print("="*60)
-    print(f"Baseline (RGB only):      {max(history_v1['val_accuracy']):.3f}")
-    print(f"+ Geometry:               {max(history_v2['val_accuracy']):.3f}")
-    # print(f"+ DINO:                   {max(history_v3['val_accuracy']):.3f}")
+    # print(f"Baseline (RGB only):      {max(history_v1['val_accuracy']):.3f}")
+    # print(f"+ Geometry:               {max(history_v2['val_accuracy']):.3f}")
+    print(f"+ DINO:                   {max(history_v3['val_accuracy']):.3f}")
 
 
 if __name__ == '__main__':

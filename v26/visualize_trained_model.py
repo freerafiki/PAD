@@ -14,7 +14,7 @@ from pathlib import Path
 import argparse
 from PIL import Image
 
-from dataset_v2 import PrecomposedAlignmentDataset, collate_alignment_samples
+from dataset_v3 import PrecomposedAlignmentDataset, collate_alignment_samples
 from models import BaselineScorer, GeometricScorer, MultiModalScorer
 from torch.utils.data import DataLoader
 
@@ -123,8 +123,10 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
     with torch.no_grad():
         if model_type == 'multimodal':
             scores = model(rgb, rgb_geometric).squeeze()
-        else:
+        elif model_type == 'geometric':
             scores = model(rgb_geometric).squeeze()
+        else:
+            scores = model(rgb).squeeze()
 
     scores_np = scores.cpu().numpy()
 
@@ -584,7 +586,6 @@ def main(args):
             batch_idx=batch_idx,
             model_type=args.model_type
         )
-        breakpoint()
 
     # Score distribution
     print("\nAnalyzing score distributions...")

@@ -50,6 +50,7 @@ def train_model(model, train_dataset, val_dataset,
     model = model.to(device)
     best_val_acc = 0.0
 
+    # add a comment here
     for epoch in range(num_epochs):
         # Training
         model.train()

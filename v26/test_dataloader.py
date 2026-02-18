@@ -1,12 +1,12 @@
 from torch.utils.data import DataLoader
-from dataset_v2 import PrecomposedAlignmentDataset, collate_alignment_samples
+from dataset_v3 import PrecomposedAlignmentDataset, collate_alignment_samples
 import matplotlib.pyplot as plt
 import numpy as np
 
 # Create dataset
 dataset = PrecomposedAlignmentDataset(
     data_root='/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4',
-    negatives_per_positive=6,  # Will sample 3 hard + 3 easy
+    negatives_per_positive=4,  # Will sample 3 hard + 3 easy
     radius = 30,
     threshold = 30
 )
