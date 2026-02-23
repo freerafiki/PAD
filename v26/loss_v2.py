@@ -7,6 +7,204 @@ import torch.nn as nn
 import numpy as np
 
 
+class BoundaryConsistencyLoss(nn.Module):
+    """
+    Penalize visual discontinuity across piece boundaries.
+    
+    Measures feature similarity in the contact region between two pieces.
+    """
+    
+    def __init__(self, feature_extractor='dino', consistency_weight=1.0):
+        """
+        Args:
+            feature_extractor: 'dino' or 'vit' - which features to use
+            consistency_weight: How much to weight this loss
+        """
+        super().__init__()
+        self.feature_extractor = feature_extractor
+        self.consistency_weight = consistency_weight
+    
+    def extract_boundary_features(self, model, rgb, rgb_geometric, contact_mask):
+        """
+        Extract features in the contact region for each piece.
+        
+        Args:
+            model: Your trained model
+            rgb: (B, 3, H, W)
+            rgb_geometric: (B, 6, H, W)
+            contact_mask: (B, H, W) - binary mask of contact region
+        
+        Returns:
+            features_A: (B, D) - average features on piece A side of boundary
+            features_B: (B, D) - average features on piece B side of boundary
+        """
+        B = rgb.shape[0]
+        
+        # Get DINO features (use frozen DINO for consistency)
+        if self.feature_extractor == 'dino':
+            with torch.no_grad():
+                outputs = model.dino(rgb, output_hidden_states=True)
+                # Get patch features (not pooled)
+                patch_features = outputs.last_hidden_state[:, 1:, :]  # (B, num_patches, 768)
+        elif self.feature_extractor == 'vit':
+            # Use geometric ViT
+            vit_input = model.projection(rgb_geometric) if hasattr(model, 'projection') else rgb_geometric[:, :3]
+            outputs = model.geometric_vit(vit_input, output_hidden_states=True)
+            patch_features = outputs.last_hidden_state[:, 1:, :]
+        
+        # Reshape to spatial grid (14x14 for ViT-Base)
+        num_patches_side = int(np.sqrt(patch_features.shape[1]))
+        D = patch_features.shape[2]
+        patch_features = patch_features.reshape(B, num_patches_side, num_patches_side, D)
+        
+        # Upsample contact mask to patch resolution
+        contact_mask_resized = F.interpolate(
+            contact_mask.unsqueeze(1).float(),
+            size=(num_patches_side, num_patches_side),
+            mode='bilinear'
+        ).squeeze(1)  # (B, 14, 14)
+        
+        # Get piece masks
+        mask_A = rgb_geometric[:, 3]  # Proximity to A
+        mask_B = rgb_geometric[:, 4]  # Proximity to B
+        
+        # Resize to patch resolution
+        mask_A_resized = F.interpolate(
+            mask_A.unsqueeze(1),
+            size=(num_patches_side, num_patches_side),
+            mode='bilinear'
+        ).squeeze(1) > 0.5
+        
+        mask_B_resized = F.interpolate(
+            mask_B.unsqueeze(1),
+            size=(num_patches_side, num_patches_side),
+            mode='bilinear'
+        ).squeeze(1) > 0.5
+        
+        # Extract features near boundary on each side
+        features_A_list = []
+        features_B_list = []
+        
+        for b in range(B):
+            # Contact region for this sample
+            contact_b = contact_mask_resized[b] > 0.3
+            
+            # Piece A side: contact region AND on piece A
+            boundary_A = contact_b & mask_A_resized[b]
+            
+            # Piece B side: contact region AND on piece B
+            boundary_B = contact_b & mask_B_resized[b]
+            
+            if boundary_A.sum() > 0:
+                feats_A = patch_features[b][boundary_A].mean(dim=0)  # (D,)
+            else:
+                feats_A = torch.zeros(D, device=rgb.device)
+            
+            if boundary_B.sum() > 0:
+                feats_B = patch_features[b][boundary_B].mean(dim=0)  # (D,)
+            else:
+                feats_B = torch.zeros(D, device=rgb.device)
+            
+            features_A_list.append(feats_A)
+            features_B_list.append(feats_B)
+        
+        features_A = torch.stack(features_A_list)  # (B, D)
+        features_B = torch.stack(features_B_list)  # (B, D)
+        
+        return features_A, features_B
+    
+    def forward(self, model, rgb, rgb_geometric, labels):
+        """
+        Compute boundary consistency loss.
+        
+        For positive samples: features should be similar across boundary
+        For negative samples: we don't care (or penalize similarity)
+        """
+        # Extract contact region from geometric features
+        contact_mask = rgb_geometric[:, 5]  # Channel 5 is contact region
+        
+        # Get boundary features from both sides
+        features_A, features_B = self.extract_boundary_features(
+            model, rgb, rgb_geometric, contact_mask
+        )
+        
+        # Compute cosine similarity
+        similarity = F.cosine_similarity(features_A, features_B, dim=1)  # (B,)
+        
+        # For positive samples: maximize similarity
+        # For negative samples: minimize similarity (or ignore)
+        pos_mask = labels == 1.0
+        neg_mask = labels == 0.0
+        
+        loss = 0.0
+        
+        if pos_mask.sum() > 0:
+            # Positive: want high similarity (close to 1)
+            pos_similarity = similarity[pos_mask]
+            pos_loss = (1.0 - pos_similarity).mean()
+            loss += pos_loss
+        
+        if neg_mask.sum() > 0:
+            # Negative: want low similarity (close to 0)
+            # Use hinge loss: only penalize if similarity is too high
+            neg_similarity = similarity[neg_mask]
+            neg_loss = torch.clamp(neg_similarity - 0.3, min=0).mean()  # Margin at 0.3
+            loss += neg_loss * 0.5  # Weight negatives less
+        
+        return loss * self.consistency_weight
+
+class ContrastiveBoundaryLoss(nn.Module):
+    """
+    Contrastive loss for boundary features.
+    
+    Pull together: features across boundary in positive samples
+    Push apart: features across boundary in negative samples
+    """
+    
+    def __init__(self, temperature=0.1, margin=0.5):
+        super().__init__()
+        self.temperature = temperature
+        self.margin = margin
+    
+    def forward(self, model, rgb, rgb_geometric, labels):
+        """
+        Contrastive loss in the boundary region.
+        """
+        # Extract boundary features (same as before)
+        contact_mask = rgb_geometric[:, 5]
+        
+        with torch.no_grad():
+            outputs = model.dino(rgb, output_hidden_states=True)
+            patch_features = outputs.last_hidden_state[:, 1:, :]
+        
+        # ... [same feature extraction as BoundaryConsistencyLoss]
+        
+        features_A, features_B = self.extract_boundary_features(...)
+        
+        # Normalize features
+        features_A = F.normalize(features_A, dim=1)
+        features_B = F.normalize(features_B, dim=1)
+        
+        # Compute all pairwise similarities
+        # For each positive, compare with all negatives
+        pos_mask = labels == 1.0
+        neg_mask = labels == 0.0
+        
+        if pos_mask.sum() == 0 or neg_mask.sum() == 0:
+            return torch.tensor(0.0, device=rgb.device)
+        
+        # For positives: similarity should be high
+        pos_sim = (features_A[pos_mask] * features_B[pos_mask]).sum(dim=1)
+        
+        # For negatives: similarity should be low
+        neg_sim = (features_A[neg_mask] * features_B[neg_mask]).sum(dim=1)
+        
+        # Contrastive loss
+        pos_loss = -torch.log(torch.exp(pos_sim / self.temperature).mean() + 1e-8)
+        neg_loss = torch.clamp(self.margin - neg_sim, min=0).mean()
+        
+        return pos_loss + neg_loss
+
 class PerceptualBoundaryLoss(nn.Module):
     """
     Simple perceptual loss: RGB values should be similar across boundary.

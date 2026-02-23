@@ -198,6 +198,7 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
             rgb_geometric = batch["rgb_geometric"].to(device)
             labels = batch["labels"].to(device)
             difficulties = batch["difficulties"]
+            group_sizes = batch['group_sizes']  # *** NEW ***
 
             # Get logits and convert to probabilities
             if model_type == 'geometric':
@@ -206,38 +207,51 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
                 logits = model(rgb, rgb_geometric)
             scores = torch.sigmoid(logits)  # Convert to [0, 1]
 
+            # breakpoint()
             scores_np = scores.cpu().numpy()
             labels_np = labels.cpu().numpy()
 
             # Find groups
-            positive_indices = np.where(labels_np == 1.0)[0]
+            start_idx = 0
+            for group_size in group_sizes:
+                end_idx = start_idx + group_size
 
-            for i, pos_idx in enumerate(positive_indices):
-                if i < len(positive_indices) - 1:
-                    next_pos_idx = positive_indices[i + 1]
-                else:
-                    next_pos_idx = len(scores_np)
+                group_scores = scores_np[start_idx:end_idx]
+                group_labels = labels_np[start_idx:end_idx]
+                group_difficulties = difficulties[start_idx:end_idx]
 
-                group_scores = scores_np[pos_idx:next_pos_idx]
-                group_labels = labels_np[pos_idx:next_pos_idx]
-                group_difficulties = difficulties[pos_idx:next_pos_idx]
+                # Find positive (should be exactly one)
+                pos_mask = group_labels == 1.0
+                if pos_mask.sum() != 1:
+                    print(f"⚠️  Warning: Group has {pos_mask.sum()} positives (expected 1)")
+                    start_idx = end_idx
+                    continue
 
-                # Find the rank of the positive sample
-                # Sort indices by score (descending)
-                sorted_indices = np.argsort(-group_scores)
-                # Find position of positive (index 0 in group_labels since positive is first)
-                positive_rank = np.where(sorted_indices == 0)[0][0]  # 0-indexed rank
+                pos_idx_in_group = np.where(pos_mask)[0][0]
+                pos_score = group_scores[pos_idx_in_group]
+                
+                # Check if positive has highest score
+                if pos_score == group_scores.max():
+                    correct += 1
+                
+                total_groups += 1
+                
+                # Collect statistics
+                all_pos_scores.append(pos_score)
+                all_neg_scores.extend(group_scores[~pos_mask])
+                
+                start_idx = end_idx
                 
                 # Top-1: positive is ranked first
-                if positive_rank == 0:
+                if pos_idx_in_group == 0:
                     correct_top1 += 1
                 
                 # Top-3: positive is in top 3
-                if positive_rank < 3:
+                if pos_idx_in_group < 3:
                     correct_top3 += 1
                 
                 # Top-5: positive is in top 5
-                if positive_rank < 5:
+                if pos_idx_in_group < 5:
                     correct_top5 += 1
 
                 total_groups += 1
@@ -259,6 +273,56 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
     avg_hard_neg_score = np.mean(all_hard_neg_scores) if all_hard_neg_scores else 0.0
 
     return accuracy_top1, accuracy_top3, accuracy_top5, avg_pos_score, avg_neg_score, avg_hard_neg_score
+
+def debug_group_structure(batch):
+    """
+    Verify that group_sizes correctly partition the batch.
+    """
+    labels = batch['labels']
+    group_sizes = batch['group_sizes']
+    
+    print("\n=== Group Structure Debug ===")
+    print(f"Total samples: {len(labels)}")
+    print(f"Group sizes: {group_sizes}")
+    print(f"Sum of group sizes: {sum(group_sizes)}")
+    
+    assert len(labels) == sum(group_sizes), "Group sizes don't match batch size!"
+    
+    start_idx = 0
+    for group_idx, group_size in enumerate(group_sizes):
+        end_idx = start_idx + group_size
+        group_labels = labels[start_idx:end_idx]
+        
+        num_pos = (group_labels == 1.0).sum().item()
+        num_neg = (group_labels == 0.0).sum().item()
+        
+        print(f"Group {group_idx}: size={group_size}, pos={num_pos}, neg={num_neg}")
+        
+        if num_pos != 1:
+            print(f"  ⚠️  WARNING: Expected 1 positive, got {num_pos}")
+        
+        start_idx = end_idx
+    
+    print("✓ Group structure is valid")
+
+# # Use it
+# for batch in train_loader:
+#     debug_group_structure(batch)
+#     break
+# ```
+
+# Expected output:
+# ```
+# === Group Structure Debug ===
+# Total samples: 28
+# Group sizes: [7, 5, 8, 6, 2]
+# Sum of group sizes: 28
+# Group 0: size=7, pos=1, neg=6
+# Group 1: size=5, pos=1, neg=4
+# Group 2: size=8, pos=1, neg=7
+# Group 3: size=6, pos=1, neg=5
+# Group 4: size=2, pos=1, neg=1
+# ✓ Group structure is valid
 
 def diagnose_data_sufficiency(history):
     """

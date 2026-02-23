@@ -376,6 +376,7 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
     labels = batch['labels'].cpu().numpy()
     difficulties = batch['difficulties']
     positions = batch['positions']
+    group_sizes = batch['group_sizes']  
     
     # Get predictions
     with torch.no_grad():
@@ -398,18 +399,13 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
     if model_type == 'multimodal':
         dino_attention = extract_dino_attention(model, rgb)
     
-    # Identify groups
-    positive_indices = np.where(labels == 1.0)[0]
-    
-    for group_idx, pos_idx in enumerate(positive_indices):
-        # Find group boundaries
-        if group_idx < len(positive_indices) - 1:
-            next_pos_idx = positive_indices[group_idx + 1]
-        else:
-            next_pos_idx = len(labels)
+    # *** Process each group using group_sizes ***
+    start_idx = 0
+    for group_idx, group_size in enumerate(group_sizes):
+        end_idx = start_idx + group_size
         
         # Extract this group
-        group_indices = range(pos_idx, next_pos_idx)
+        group_indices = range(start_idx, end_idx)
         group_size = len(group_indices)
         
         # Extract data for this group
@@ -431,6 +427,13 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
 
         # Rank by score (descending)
         rank_order = np.argsort(-group_scores)
+
+        # Find positive
+        pos_mask = group_labels == 1.0
+        if pos_mask.sum() != 1:
+            print(f"⚠️  Warning: Group {group_idx} has {pos_mask.sum()} positives")
+            start_idx = end_idx
+            continue
         
         # Check if positive is ranked first
         is_correct = (group_labels[rank_order[0]] == 1.0)

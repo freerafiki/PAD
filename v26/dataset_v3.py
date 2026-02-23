@@ -703,6 +703,7 @@ def collate_alignment_samples(batch_list):
     difficulties = [d for item in batch_list for d in item['difficulties']]
     positions = [p for item in batch_list for p in item['positions']]
     pair_keys = [item['pair_key'] for item in batch_list]
+    group_sizes = [len(item['labels']) for item in batch_list]
 
     result = {
         'rgb': rgb,
@@ -710,7 +711,8 @@ def collate_alignment_samples(batch_list):
         'labels': labels,
         'difficulties': difficulties,
         'positions': positions,
-        'pair_keys': pair_keys
+        'pair_keys': pair_keys,
+        'group_sizes': group_sizes
     }
 
     return result

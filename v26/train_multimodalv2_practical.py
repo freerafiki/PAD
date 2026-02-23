@@ -13,7 +13,7 @@ from dataset_v3 import (
 )
 from models import MultiModalScorerV2_Practical, GeometricScorer
 from loss_v2 import AdaptiveTopNRankingLoss, PerceptualBoundaryLoss
-from training_utils import plot_training_history
+from training_utils import plot_training_history, debug_group_structure
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 from training_utils import plot_training_history, evaluate_ranking, estimate_data_needs, diagnose_data_sufficiency
@@ -32,9 +32,10 @@ def train_model(
     save_dir="checkpoints",
     model_name="model",
     early_stopping_patience=10,  # NEW: Stop if no improvement
-    bce_weight=0.2,  # Weight for BCE loss (lower for ranking-focused training)
-    ranking_weight=0.8,  # Weight for Adaptive ranking loss (higher priority)
+    bce_weight=0.15,  # Weight for BCE loss (lower for ranking-focused training)
+    ranking_weight=0.55,  # Weight for Adaptive ranking loss (higher priority)
     ranking_margin=0.3,  # Margin for ranking loss
+    boundary_weight=0.3,
     hard_negative_weight=2.0,  # Weight for hard negatives in ranking loss
     top_n=3,  # Target top-N positions for AdaptiveTopNRankingLoss
     temperature=1.0,  # Temperature for smooth position penalty
@@ -54,6 +55,10 @@ def train_model(
         num_workers=4,
         pin_memory=True,
     )
+
+    for batch in train_loader:
+        debug_group_structure(batch)
+        breakpoint()
 
     val_loader = DataLoader(
         val_dataset,
@@ -363,7 +368,7 @@ def main():
         lr=1e-4,
         weight_decay=1e-4,
         early_stopping_patience=3,
-        model_name="multimodal_boundary",
+        model_name="multimodal_boundary2",
         # Combined loss weights (ranking-focused)
         bce_weight=0.15,  # Lower weight for BCE classification loss
         ranking_weight=0.55,  # Higher weight for Adaptive ranking loss
