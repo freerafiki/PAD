@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -12,16 +11,19 @@ from dataset_v3 import (
     ShuffledBatchSampler,
     collate_alignment_samples,
 )
-from models import MultiModalScorerV2
-from loss_v2 import RankingLoss
+from models import MultiModalScorerV2_Practical
+from loss_v2 import AdaptiveTopNRankingLoss
+from training_utils import plot_training_history
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
+
 
 
 def train_model(
     model,
     train_dataset,
     val_dataset,
+    optimizer=None,
     num_epochs=50,
     batch_size=4,
     lr=1e-4,
@@ -30,13 +32,15 @@ def train_model(
     save_dir="checkpoints",
     model_name="model",
     early_stopping_patience=10,  # NEW: Stop if no improvement
-    bce_weight=1.0,  # Weight for BCE loss
-    ranking_weight=1.0,  # Weight for ranking loss
+    bce_weight=0.2,  # Weight for BCE loss (lower for ranking-focused training)
+    ranking_weight=0.8,  # Weight for Adaptive ranking loss (higher priority)
     ranking_margin=0.3,  # Margin for ranking loss
     hard_negative_weight=2.0,  # Weight for hard negatives in ranking loss
+    top_n=3,  # Target top-N positions for AdaptiveTopNRankingLoss
+    temperature=1.0,  # Temperature for smooth position penalty
 ):
     """
-    Training with combined BCE + Ranking loss and early stopping for small datasets.
+    Training with combined BCE + AdaptiveTopNRankingLoss and early stopping for small datasets.
     """
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
@@ -62,14 +66,17 @@ def train_model(
 
     # Loss functions
     bce_criterion = nn.BCEWithLogitsLoss()  # More stable than BCE + Sigmoid
-    ranking_criterion = RankingLoss(
-        margin=ranking_margin, 
+    ranking_criterion = AdaptiveTopNRankingLoss(
+        top_n=top_n,
+        margin=ranking_margin,
         hard_negative_weight=hard_negative_weight,
-        top_n_penalty_threshold=5,  # Penalty if positive not in top-5
-        top_n_penalty_weight=2.0,   # Extra penalty weight
+        temperature=temperature,
     )
     
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    if optimizer is not None:
+        optimizer = optimizer
+    else:
+        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     # Cosine annealing with warmup
     scheduler = optim.lr_scheduler.OneCycleLR(
@@ -105,7 +112,8 @@ def train_model(
 
     print(f"Training {model_name} for up to {num_epochs} epochs")
     print(f"Early stopping patience: {early_stopping_patience}")
-    print(f"Loss weights: BCE={bce_weight}, Ranking={ranking_weight}")
+    print(f"Loss: BCE={bce_weight} + AdaptiveTopNRankingLoss={ranking_weight}")
+    print(f"  AdaptiveTopNRankingLoss: top_n={top_n}, margin={ranking_margin}, temperature={temperature}")
     print(f"Train samples: {len(train_dataset)} pairs")
     print(f"Val samples: {len(val_dataset)} pairs")
     print("-" * 60)
@@ -197,7 +205,7 @@ def train_model(
         avg_val_loss = val_loss / num_batches
         avg_val_bce = val_bce_loss / num_batches
         avg_val_ranking = val_ranking_loss / num_batches
-
+        
         # Ranking accuracy (Top-1, Top-3, Top-5)
         val_acc, val_top3_acc, val_top5_acc, avg_pos, avg_neg, avg_hard_neg = evaluate_ranking(model, val_loader, device)
 
@@ -216,16 +224,33 @@ def train_model(
         history["val_hard_neg_score"].append(avg_hard_neg)
         history["learning_rates"].append(scheduler.get_last_lr()[0])
 
+
+        # Ranking accuracy
+        val_acc, avg_pos, avg_neg, avg_hard_neg = evaluate_ranking(model, val_loader, device)
+
+        # Record history
+        history["train_loss"].append(avg_train_loss)
+        history["train_bce_loss"].append(avg_train_bce)
+        history["train_ranking_loss"].append(avg_train_ranking)
+        history["val_loss"].append(avg_val_loss)
+        history["val_bce_loss"].append(avg_val_bce)
+        history["val_ranking_loss"].append(avg_val_ranking)
+        history["val_accuracy"].append(val_acc)
+        history["val_pos_score"].append(avg_pos)
+        history["val_neg_score"].append(avg_neg)
+        history["val_hard_neg_score"].append(avg_hard_neg)
+        history["learning_rates"].append(scheduler.get_last_lr()[0])
+
         print(
             f"Epoch {epoch:3d}/{num_epochs} | "
             f"Train Loss: {avg_train_loss:.4f} (BCE: {avg_train_bce:.4f}, Rank: {avg_train_ranking:.4f}) | "
             f"Val Loss: {avg_val_loss:.4f} | "
-            f"Acc: {val_acc:.3f} (Top3: {val_top3_acc:.3f}, Top5: {val_top5_acc:.3f}) | "
+            f"Val Acc: {val_acc:.3f} | "
             f"Pos/Neg/Hard: {avg_pos:.3f}/{avg_neg:.3f}/{avg_hard_neg:.3f} | "
             f"LR: {scheduler.get_last_lr()[0]:.6f}"
         )
 
-        # Early stopping check (based on Top-1 accuracy)
+        # Early stopping check
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             patience_counter = 0
@@ -262,14 +287,11 @@ def train_model(
 def evaluate_ranking(model, dataloader, device):
     """
     Evaluate ranking accuracy: is positive ranked first in each group?
-    Also returns top-3 and top-5 accuracy, and average scores for positives, 
-    negatives, and hard negatives.
+    Also returns average scores for positives, negatives, and hard negatives.
     """
     model.eval()
 
-    correct_top1 = 0
-    correct_top3 = 0
-    correct_top5 = 0
+    correct = 0
     total_groups = 0
     all_pos_scores = []
     all_neg_scores = []
@@ -302,23 +324,9 @@ def evaluate_ranking(model, dataloader, device):
                 group_labels = labels_np[pos_idx:next_pos_idx]
                 group_difficulties = difficulties[pos_idx:next_pos_idx]
 
-                # Find the rank of the positive sample
-                # Sort indices by score (descending)
-                sorted_indices = np.argsort(-group_scores)
-                # Find position of positive (index 0 in group_labels since positive is first)
-                positive_rank = np.where(sorted_indices == 0)[0][0]  # 0-indexed rank
-                
-                # Top-1: positive is ranked first
-                if positive_rank == 0:
-                    correct_top1 += 1
-                
-                # Top-3: positive is in top 3
-                if positive_rank < 3:
-                    correct_top3 += 1
-                
-                # Top-5: positive is in top 5
-                if positive_rank < 5:
-                    correct_top5 += 1
+                # Is positive ranked first?
+                if group_scores[0] == group_scores.max():
+                    correct += 1
 
                 total_groups += 1
 
@@ -331,14 +339,9 @@ def evaluate_ranking(model, dataloader, device):
                     else:
                         all_neg_scores.append(score)
 
-    accuracy_top1 = correct_top1 / total_groups if total_groups > 0 else 0.0
-    accuracy_top3 = correct_top3 / total_groups if total_groups > 0 else 0.0
-    accuracy_top5 = correct_top5 / total_groups if total_groups > 0 else 0.0
+    accuracy = correct / total_groups if total_groups > 0 else 0.0
     avg_pos_score = np.mean(all_pos_scores) if all_pos_scores else 0.0
     avg_neg_score = np.mean(all_neg_scores) if all_neg_scores else 0.0
-    avg_hard_neg_score = np.mean(all_hard_neg_scores) if all_hard_neg_scores else 0.0
-
-    return accuracy_top1, accuracy_top3, accuracy_top5, avg_pos_score, avg_neg_score, avg_hard_neg_score
     avg_hard_neg_score = np.mean(all_hard_neg_scores) if all_hard_neg_scores else 0.0
 
     return accuracy, avg_pos_score, avg_neg_score, avg_hard_neg_score
@@ -526,38 +529,39 @@ def main():
         print("✓ No puzzle overlap between train and val")
 
     print("\n" + "=" * 60)
-    print("TRAINING MODEL 4: RGB + Geometry + DINO (v2)")
+    print("TRAINING MODEL 5: RGB + Geometry + DINO (with more frozen layers)")
     print("=" * 60)
-    # Version without cross-attention (Option A + B)
-    model_v2 = MultiModalScorerV2(
-        use_cross_attention=False,
-        dropout=0.45,  # Higher dropout for small data
+
+    model = MultiModalScorerV2_Practical(
+        freeze_vit_layers=10,  # Only train last 2 layers
+        dropout=0.5
     )
 
-    # Version with cross-attention (Option A + B + C)
-    # model_v3 = MultiModalScorerV2(
-    #     use_cross_attention=True,
-    #     dropout=0.3
-    # )
+    # Train with strong regularization
+    optimizer = optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
 
-    estimate_data_needs(model_v2, train_dataset)
-    
-    # Train with combined BCE + Ranking loss
+    estimate_data_needs(model, train_dataset)
+
+    # Train with combined BCE + AdaptiveTopNRankingLoss
     model, history = train_model(
-        model_v2,
+        model,
         train_dataset,
         val_dataset,
-        num_epochs=10,
+        optimizer=optimizer,
+        num_epochs=5,
         batch_size=8,
         lr=1e-4,
         weight_decay=1e-4,
         early_stopping_patience=3,
-        model_name="multimodal_v2",
-        # Combined loss weights
-        bce_weight=1.0,  # Weight for BCE classification loss
-        ranking_weight=1.0,  # Weight for ranking loss
+        model_name="multimodal_v2_practical",
+        # Combined loss weights (ranking-focused)
+        bce_weight=0.2,  # Lower weight for BCE classification loss
+        ranking_weight=0.8,  # Higher weight for Adaptive ranking loss
+        # AdaptiveTopNRankingLoss parameters
         ranking_margin=0.3,  # Margin for ranking loss
         hard_negative_weight=2.0,  # Weight for hard negatives in ranking loss
+        top_n=3,  # Target top-3 positions
+        temperature=1.0,  # Smoothness of position penalty
     )
 
     # Use it
