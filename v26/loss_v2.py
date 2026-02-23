@@ -7,6 +7,61 @@ import torch.nn as nn
 import numpy as np
 
 
+class PerceptualBoundaryLoss(nn.Module):
+    """
+    Simple perceptual loss: RGB values should be similar across boundary.
+    """
+    
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, rgb, rgb_geometric, labels):
+        """
+        Measure RGB similarity across contact boundary.
+        """
+        contact_mask = rgb_geometric[:, 5]  # (B, H, W)
+        mask_A = rgb_geometric[:, 3] > 0.5  # Piece A region
+        mask_B = rgb_geometric[:, 4] > 0.5  # Piece B region
+        
+        B = rgb.shape[0]
+        losses = []
+        
+        for b in range(B):
+            # Skip if not positive
+            if labels[b] != 1.0:
+                continue
+            
+            # Contact region
+            contact_b = contact_mask[b] > 0.3
+            
+            # Dilate to get regions on both sides
+            from scipy.ndimage import binary_dilation
+            contact_dilated = torch.from_numpy(
+                binary_dilation(contact_b.cpu().numpy(), iterations=3)
+            ).to(rgb.device)
+            
+            # Side A: contact region intersect piece A
+            side_A = contact_dilated & mask_A[b]
+            
+            # Side B: contact region intersect piece B
+            side_B = contact_dilated & mask_B[b]
+            
+            if side_A.sum() == 0 or side_B.sum() == 0:
+                continue
+            
+            # Get RGB values
+            rgb_A = rgb[b][:, side_A].mean(dim=1)  # (3,)
+            rgb_B = rgb[b][:, side_B].mean(dim=1)  # (3,)
+            
+            # L2 distance
+            color_diff = ((rgb_A - rgb_B) ** 2).mean()
+            losses.append(color_diff)
+        
+        if len(losses) == 0:
+            return torch.tensor(0.0, device=rgb.device)
+        
+        return torch.stack(losses).mean()
+
 class TopNRankingLoss(nn.Module):
     """
     Ranking loss that penalizes when positive is not in top N positions.

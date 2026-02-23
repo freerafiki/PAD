@@ -20,7 +20,11 @@ def parse_filename(filename):
     """
     Parse alignment filename into components.
 
-    Example: "puzzle_0000029_RP_group_28_vis_8_RPf_00202_7_RPf_00201_493_411_0_gt.png"
+    Example: 
+    positive and negatives have:
+    "puzzle_0000029_RP_group_28_vis_8_RPf_00202_7_RPf_00201_493_411_0_gt.png"
+    hard_negatives have:
+    'puzzle_0000001_RP_group_1_1_RPf_00002_vs_8_RPf_00009_score61.png'
 
     Returns:
         dict with puzzle_id, piece1_id, piece2_id, transform, suffix
@@ -33,17 +37,32 @@ def parse_filename(filename):
 
     match = re.match(pattern, basename)
 
-    if not match:
-        return None
+    pattern2 = r'(puzzle_\d+_RP_group_\d+)_(\d+_RPf_\d+)_vs_(\d+_RPf_\d+)_(.+)$'
 
-    return {
-        'puzzle_id': match.group(1),
-        'piece1_id': match.group(2),
-        'piece2_id': match.group(3),
-        'transform': match.group(4),
-        'suffix': match.group(5),
-        'basename': basename
-    }
+    parsed = None
+    if not match:
+        match2 = re.match(pattern2, basename)
+        if not match2:
+            return None
+        else:
+            parsed = {
+                'puzzle_id': match2.group(1),
+                'piece1_id': match2.group(2),
+                'piece2_id': match2.group(3),
+                'transform': "",
+                'suffix': match2.group(4),
+                'basename': basename
+            }
+    else:
+        parsed = {
+            'puzzle_id': match.group(1),
+            'piece1_id': match.group(2),
+            'piece2_id': match.group(3),
+            'transform': match.group(4),
+            'suffix': match.group(5),
+            'basename': basename
+        }
+    return parsed
 
 
 def get_pair_key(filename):
@@ -588,7 +607,7 @@ class PrecomposedAlignmentDataset(Dataset):
 
         return np.stack(resized_channels, axis=0)
 
-    def create_split(self, train_puzzles=None, val_puzzles=None, radius=30, threshold=30):
+    def create_split(self, train_puzzles=None, val_puzzles=None, radius=50, threshold=50):
         """
         Create a filtered dataset for train or validation.
 
@@ -632,7 +651,7 @@ class PrecomposedAlignmentDataset(Dataset):
         return new_dataset
 
     @staticmethod
-    def create_puzzle_split(dataset, train_ratio=0.8, seed=42, radius=30, threshold=30):
+    def create_puzzle_split(dataset, train_ratio=0.8, seed=42, radius=50, threshold=50):
         """
         Split dataset by puzzles (no puzzle appears in both train and val).
 

@@ -1,3 +1,6 @@
+from loss_v2 import AdaptiveTopNRankingLoss
+import torch 
+
 # Sanity check: does the loss behave as expected?
 def test_loss():
     criterion = AdaptiveTopNRankingLoss(top_n=3, margin=0.3, temperature=0.5)
