@@ -392,14 +392,13 @@ class TopNRankingLoss(nn.Module):
         
         return total_loss / num_groups if num_groups > 0 else torch.tensor(0.0, device=scores.device)
 
-
 class AdaptiveTopNRankingLoss(nn.Module):
     """
-    Advanced version: penalty curve is differentiable and smooth.
+    Top-N ranking loss that works with explicit group boundaries.
     """
     
     def __init__(self, 
-                 top_n=3, 
+                 top_n=5, 
                  margin=0.3,
                  hard_negative_weight=2.0,
                  temperature=1.0):
@@ -416,50 +415,60 @@ class AdaptiveTopNRankingLoss(nn.Module):
         self.hard_negative_weight = hard_negative_weight
         self.temperature = temperature
     
-    def forward(self, scores, labels, difficulties):
-        """Differentiable version using soft ranking."""
-        pos_mask = labels == 1.0
-        neg_mask = labels == 0.0
+    def forward(self, scores, labels, difficulties, group_sizes=None):
+        """
+        Differentiable version using soft ranking.
+        Args:
+            scores: (B,) predicted scores
+            labels: (B,) ground truth
+            difficulties: List[str] of length B
+            group_sizes: List[int] - sizes of each group (NEW!)
+        """
+        if group_sizes is None:
+            # Fallback: try to infer groups from positives
+            return self._forward_inferred_groups(scores, labels, difficulties)
         
-        pos_indices = torch.where(pos_mask)[0]
-        neg_indices = torch.where(neg_mask)[0]
-        
-        if len(pos_indices) == 0 or len(neg_indices) == 0:
-            return torch.tensor(0.0, device=scores.device, requires_grad=True)
-        
+        # Process each group explicitly
         total_loss = 0.0
         num_groups = 0
         
-        for i, pos_idx in enumerate(pos_indices):
-            # Find group
-            if i < len(pos_indices) - 1:
-                group_end = pos_indices[i + 1]
-            else:
-                group_end = len(scores)
+        start_idx = 0
+        for group_idx, group_size in enumerate(group_sizes):
+            end_idx = start_idx + group_size
             
-            group_neg_mask = (neg_indices >= pos_idx) & (neg_indices < group_end)
-            group_neg_indices = neg_indices[group_neg_mask]
+            # Extract group
+            group_scores = scores[start_idx:end_idx]
+            group_labels = labels[start_idx:end_idx]
+            group_difficulties = difficulties[start_idx:end_idx]
             
-            if len(group_neg_indices) == 0:
+            # Validate: should have exactly 1 positive
+            pos_mask = group_labels == 1.0
+            if pos_mask.sum() != 1:
+                print(f"⚠️  Warning: Group {group_idx} has {pos_mask.sum().item()} positives")
+                start_idx = end_idx
                 continue
             
-            pos_score = scores[pos_idx]
-            neg_scores = scores[group_neg_indices]
+            # Get positive and negative scores
+            pos_idx = torch.where(pos_mask)[0][0]
+            neg_mask = ~pos_mask
+            
+            pos_score = group_scores[pos_idx]
+            neg_scores = group_scores[neg_mask]
+            
+            if len(neg_scores) == 0:
+                start_idx = end_idx
+                continue
             
             # ============================================
-            # Soft Position Estimate (Differentiable)
+            # Soft Position Estimate
             # ============================================
             
-            # Soft count of how many negatives are "higher" using sigmoid
-            # This is differentiable unlike hard thresholding
-            score_diffs = neg_scores - pos_score  # (K,)
-            soft_higher = torch.sigmoid(score_diffs / self.temperature)  # (K,)
+            score_diffs = neg_scores - pos_score
+            soft_higher = torch.sigmoid(score_diffs / self.temperature)
             soft_position = soft_higher.sum() + 1.0
             
-            # Smooth position penalty
-            # Using smooth exponential curve
+            # Position penalty (exponential beyond top-N)
             if self.top_n > 1:
-                # Penalty grows exponentially beyond top-N
                 normalized_pos = (soft_position - 1.0) / (self.top_n - 1.0)
                 position_penalty = torch.exp(torch.clamp(normalized_pos - 1.0, min=0.0)) - 1.0
             else:
@@ -469,29 +478,221 @@ class AdaptiveTopNRankingLoss(nn.Module):
             # Pairwise Ranking Loss
             # ============================================
             
-            group_difficulties = [difficulties[idx.item()] for idx in group_neg_indices]
-            
             pairwise_losses = torch.clamp(self.margin + neg_scores - pos_score, min=0)
             
-            # Weights
+            # Weight by difficulty
             weights = torch.ones_like(neg_scores)
-            for j, diff in enumerate(group_difficulties):
+            neg_difficulties = [group_difficulties[i] for i in range(group_size) if i != pos_idx.item()]
+            
+            for i, diff in enumerate(neg_difficulties):
                 if diff == 'hard_negative':
-                    weights[j] = self.hard_negative_weight
+                    weights[i] = self.hard_negative_weight
             
             weighted_losses = pairwise_losses * weights
             base_loss = weighted_losses.mean()
             
-            # ============================================
             # Combine with position penalty
-            # ============================================
-            
             group_loss = base_loss * (1.0 + position_penalty)
             
             total_loss += group_loss
             num_groups += 1
+            
+            start_idx = end_idx
         
-        return total_loss / num_groups if num_groups > 0 else torch.tensor(0.0, device=scores.device)
+        return total_loss / num_groups if num_groups > 0 else torch.tensor(0.0, device=scores.device, requires_grad=True)
+    
+    def _forward_inferred_groups(self, scores, labels, difficulties):
+        """
+        Fallback: infer groups from positives (old behavior).
+        Use this if group_sizes not provided.
+
+        This is very likely to fail!
+        """
+        print("\n\n WARNING: \n\n")
+        print("`group_sizes` not provided, so groups are inferred based on positive samples.")
+        print("This is likely to produce mixed groups within batches if shuffle is used\n\n")
+        pos_indices = torch.where(labels == 1.0)[0]
+        
+        if len(pos_indices) == 0:
+            return torch.tensor(0.0, device=scores.device, requires_grad=True)
+        
+        total_loss = 0.0
+        num_groups = 0
+        
+        for i, pos_idx in enumerate(pos_indices):
+            # Find group boundaries
+            if i < len(pos_indices) - 1:
+                group_end = pos_indices[i + 1]
+            else:
+                group_end = len(scores)
+            
+            # Extract group
+            group_scores = scores[pos_idx:group_end]
+            group_labels = labels[pos_idx:group_end]
+            group_difficulties = difficulties[pos_idx:group_end]
+            
+            # ... [same processing as above]
+            # this code below is copied from above
+            # TODO: re-use with function!
+            # Validate: should have exactly 1 positive
+            pos_mask = group_labels == 1.0
+            if pos_mask.sum() != 1:
+                print(f"⚠️  Warning: Group {group_idx} has {pos_mask.sum().item()} positives")
+                start_idx = end_idx
+                continue
+            
+            # Get positive and negative scores
+            pos_idx = torch.where(pos_mask)[0][0]
+            neg_mask = ~pos_mask
+            
+            pos_score = group_scores[pos_idx]
+            neg_scores = group_scores[neg_mask]
+            
+            if len(neg_scores) == 0:
+                start_idx = end_idx
+                continue
+            
+            # ============================================
+            # Soft Position Estimate
+            # ============================================
+            
+            score_diffs = neg_scores - pos_score
+            soft_higher = torch.sigmoid(score_diffs / self.temperature)
+            soft_position = soft_higher.sum() + 1.0
+            
+            # Position penalty (exponential beyond top-N)
+            if self.top_n > 1:
+                normalized_pos = (soft_position - 1.0) / (self.top_n - 1.0)
+                position_penalty = torch.exp(torch.clamp(normalized_pos - 1.0, min=0.0)) - 1.0
+            else:
+                position_penalty = soft_position - 1.0
+            
+            # ============================================
+            # Pairwise Ranking Loss
+            # ============================================
+            
+            pairwise_losses = torch.clamp(self.margin + neg_scores - pos_score, min=0)
+            
+            # Weight by difficulty
+            weights = torch.ones_like(neg_scores)
+            neg_difficulties = [group_difficulties[i] for i in range(group_size) if i != pos_idx.item()]
+            
+            for i, diff in enumerate(neg_difficulties):
+                if diff == 'hard_negative':
+                    weights[i] = self.hard_negative_weight
+            
+            weighted_losses = pairwise_losses * weights
+            base_loss = weighted_losses.mean()
+            
+            # Combine with position penalty
+            group_loss = base_loss * (1.0 + position_penalty)
+            
+            total_loss += group_loss
+            num_groups += 1
+            
+            start_idx = end_idx
+        
+        return total_loss / num_groups if num_groups > 0 else torch.tensor(0.0, device=scores.device, requires_grad=True)
+
+# class AdaptiveTopNRankingLoss(nn.Module):
+#     """
+#     Advanced version: penalty curve is differentiable and smooth.
+#     """
+    
+#     def __init__(self, 
+#                  top_n=3, 
+#                  margin=0.3,
+#                  hard_negative_weight=2.0,
+#                  temperature=1.0):
+#         """
+#         Args:
+#             top_n: Target top-N positions
+#             margin: Margin for ranking loss
+#             hard_negative_weight: Weight for hard negatives
+#             temperature: Controls smoothness of position penalty (lower = sharper)
+#         """
+#         super().__init__()
+#         self.top_n = top_n
+#         self.margin = margin
+#         self.hard_negative_weight = hard_negative_weight
+#         self.temperature = temperature
+    
+#     def forward(self, scores, labels, difficulties):
+#         """"""
+#         pos_mask = labels == 1.0
+#         neg_mask = labels == 0.0
+        
+#         pos_indices = torch.where(pos_mask)[0]
+#         neg_indices = torch.where(neg_mask)[0]
+        
+#         if len(pos_indices) == 0 or len(neg_indices) == 0:
+#             return torch.tensor(0.0, device=scores.device, requires_grad=True)
+        
+#         total_loss = 0.0
+#         num_groups = 0
+        
+#         for i, pos_idx in enumerate(pos_indices):
+#             # Find group
+#             if i < len(pos_indices) - 1:
+#                 group_end = pos_indices[i + 1]
+#             else:
+#                 group_end = len(scores)
+            
+#             group_neg_mask = (neg_indices >= pos_idx) & (neg_indices < group_end)
+#             group_neg_indices = neg_indices[group_neg_mask]
+            
+#             if len(group_neg_indices) == 0:
+#                 continue
+            
+#             pos_score = scores[pos_idx]
+#             neg_scores = scores[group_neg_indices]
+            
+#             # ============================================
+#             # Soft Position Estimate (Differentiable)
+#             # ============================================
+            
+#             # Soft count of how many negatives are "higher" using sigmoid
+#             # This is differentiable unlike hard thresholding
+#             score_diffs = neg_scores - pos_score  # (K,)
+#             soft_higher = torch.sigmoid(score_diffs / self.temperature)  # (K,)
+#             soft_position = soft_higher.sum() + 1.0
+            
+#             # Smooth position penalty
+#             # Using smooth exponential curve
+#             if self.top_n > 1:
+#                 # Penalty grows exponentially beyond top-N
+#                 normalized_pos = (soft_position - 1.0) / (self.top_n - 1.0)
+#                 position_penalty = torch.exp(torch.clamp(normalized_pos - 1.0, min=0.0)) - 1.0
+#             else:
+#                 position_penalty = soft_position - 1.0
+            
+#             # ============================================
+#             # Pairwise Ranking Loss
+#             # ============================================
+            
+#             group_difficulties = [difficulties[idx.item()] for idx in group_neg_indices]
+            
+#             pairwise_losses = torch.clamp(self.margin + neg_scores - pos_score, min=0)
+            
+#             # Weights
+#             weights = torch.ones_like(neg_scores)
+#             for j, diff in enumerate(group_difficulties):
+#                 if diff == 'hard_negative':
+#                     weights[j] = self.hard_negative_weight
+            
+#             weighted_losses = pairwise_losses * weights
+#             base_loss = weighted_losses.mean()
+            
+#             # ============================================
+#             # Combine with position penalty
+#             # ============================================
+            
+#             group_loss = base_loss * (1.0 + position_penalty)
+            
+#             total_loss += group_loss
+#             num_groups += 1
+        
+#         return total_loss / num_groups if num_groups > 0 else torch.tensor(0.0, device=scores.device)
 
 class RankingLoss(nn.Module):
     """Ranking loss: positive should score higher than negatives.

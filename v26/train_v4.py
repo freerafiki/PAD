@@ -39,6 +39,7 @@ def train_model(
     hard_negative_weight=2.0,  # Weight for hard negatives in ranking loss
     top_n=3,  # Target top-N positions for AdaptiveTopNRankingLoss
     temperature=1.0,  # Temperature for smooth position penalty
+    max_norm=1.0 # Gradient clipping (helps with small data)
 ):
     """
     Training with combined BCE + AdaptiveTopNRankingLoss and early stopping for small datasets.
@@ -56,9 +57,9 @@ def train_model(
         pin_memory=True,
     )
 
-    for batch in train_loader:
-        debug_group_structure(batch)
-        breakpoint()
+    # for batch in train_loader:
+    #     debug_group_structure(batch)
+    #     breakpoint()
 
     val_loader = DataLoader(
         val_dataset,
@@ -139,6 +140,7 @@ def train_model(
             rgb_geometric = batch["rgb_geometric"].to(device)
             labels = batch["labels"].to(device).unsqueeze(1)  # (B, 1)
             difficulties = batch["difficulties"]
+            group_sizes = batch['group_sizes']
 
             optimizer.zero_grad()
 
@@ -153,7 +155,7 @@ def train_model(
             bce_loss = bce_criterion(logits, labels)
 
             # Loss 2: Ranking Loss
-            ranking_loss = ranking_criterion(scores, labels.squeeze(), difficulties)
+            ranking_loss = ranking_criterion(scores, labels.squeeze(), difficulties, group_sizes=group_sizes)
 
             # Loss 3: Boundary consistency (auxiliary)
             boundary_loss = boundary_criterion(rgb, rgb_geometric, labels)
@@ -165,7 +167,7 @@ def train_model(
             loss.backward()
 
             # Gradient clipping (helps with small data)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
 
             optimizer.step()
             scheduler.step()
@@ -287,14 +289,15 @@ def main():
 
     # Configuration
     DATA_ROOT = "/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4"
-    BATCH_SIZE = 16
-    NUM_EPOCHS = 5
+    BATCH_SIZE = 4
+    NUM_EPOCHS = 10
     LEARNING_RATE = 1e-4
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    NEGATIVES_PER_POSITIVE = 4  # Adjusted for your data size
+    MAX_NEGATIVES_PER_POSITIVE = 15 # use all available
+      # Adjusted for your data size
 
     # DATASET PARAMETERS
-    RADIUS = 60
+    RADIUS = 80
     THRESHOLD = 100
 
     # DINO PARAMETERS
@@ -305,8 +308,7 @@ def main():
     # Load full dataset
     full_dataset = PrecomposedAlignmentDataset(
         data_root=DATA_ROOT,
-        negatives_per_positive=NEGATIVES_PER_POSITIVE,
-        hard_negative_ratio=0.6,
+        max_negatives_per_positive=MAX_NEGATIVES_PER_POSITIVE,
         radius=RADIUS,
         threshold=THRESHOLD,
     )
@@ -363,8 +365,8 @@ def main():
         train_dataset,
         val_dataset,
         optimizer=optimizer,
-        num_epochs=5,
-        batch_size=8,
+        num_epochs=NUM_EPOCHS,
+        batch_size=BATCH_SIZE,
         lr=1e-4,
         weight_decay=1e-4,
         early_stopping_patience=3,

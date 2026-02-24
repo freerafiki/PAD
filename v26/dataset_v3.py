@@ -160,34 +160,22 @@ class ShuffledBatchSampler(Sampler):
 # ============================================================================
 # Dataset Class
 # ============================================================================
-
 class PrecomposedAlignmentDataset(Dataset):
-    """
-    Dataset for alignment scoring, grouped by piece pairs.
-
-    Each item returns all alignments for one piece pair:
-    - 1 positive (ground truth)
-    - N hard negatives (high shape-matching score)
-    - M easy negatives (random wrong alignments)
-    """
-
-    def __init__(self,
+    def __init__(self, 
                  data_root,
-                 negatives_per_positive=4,  # Reduced from 6 since you have less data
-                 hard_negative_ratio=0.6,   # 60% hard, 40% easy
+                 max_negatives_per_positive=None,  # None = use all available
+                 hard_negative_ratio=0.6,
                  radius=20,
                  threshold=15,
-                 transform=None
-                 ):
+                 transform=None):
         """
         Args:
-            data_root: Path to data directory with positive/negative/hard_negative folders
-            negatives_per_positive: How many negatives to sample per positive
-            hard_negative_ratio: Fraction of negatives that should be hard
-            transform: Optional torchvision transforms for RGB images
+            max_negatives_per_positive: Maximum negatives to sample. 
+                                       If None, use all available negatives.
+            hard_negative_ratio: Fraction that should be hard negatives
         """
         self.data_root = Path(data_root)
-        self.negatives_per_positive = negatives_per_positive
+        self.max_negatives_per_positive = max_negatives_per_positive
         self.hard_negative_ratio = hard_negative_ratio
         self.radius = radius
         self.threshold = threshold
@@ -295,12 +283,14 @@ class PrecomposedAlignmentDataset(Dataset):
         print(f"  Total hard negative samples: {total_hard}")
         print(f"  Avg negatives per pair: {(total_neg + total_hard) / len(self.pairs):.2f}")
 
-        # Check pairs with insufficient negatives
-        insufficient = sum(1 for p in self.pairs.values()
-                          if len(p['negative']) + len(p['hard_negative']) < self.negatives_per_positive)
-        if insufficient > 0:
-            print(f"  ⚠ {insufficient} pairs have fewer than {self.negatives_per_positive} negatives")
-            print(f"    (will use sampling with replacement for these)")
+
+
+        # # Check pairs with insufficient negatives
+        # insufficient = sum(1 for p in self.pairs.values()
+        #                   if len(p['negative']) + len(p['hard_negative']) < self.negatives_per_positive)
+        # if insufficient > 0:
+        #     print(f"  ⚠ {insufficient} pairs have fewer than {self.negatives_per_positive} negatives")
+        #     print(f"    (will use sampling with replacement for these)")
 
     def __len__(self):
         return len(self.pair_keys)
@@ -317,68 +307,56 @@ class PrecomposedAlignmentDataset(Dataset):
                 - difficulties: List[str] category names
                 - positions: List[int] original positions before shuffle
                 - pair_key: str identifier for this pair
+        Group size varies based on available negatives.
         """
         pair_key = self.pair_keys[idx]
         pair_data = self.pairs[pair_key]
-
-        # Get positive sample (should be exactly 1, take first if multiple)
+        
+        # Get positive (exactly 1)
         if len(pair_data['positive']) == 0:
             raise ValueError(f"No positive for pair {pair_key}")
-
         pos_sample = pair_data['positive'][0]
-
-        # Sample negatives
-        n_hard_target = int(self.negatives_per_positive * self.hard_negative_ratio)
-        n_easy_target = self.negatives_per_positive - n_hard_target
-
+        
+        # Get ALL available negatives (or up to max)
+        available_hard = pair_data['hard_negative']
+        available_easy = pair_data['negative']
+        
         selected_negatives = []
-
-        # Sample hard negatives (prefer hardest ones)
-        if pair_data['hard_negative']:
-            n_hard = min(n_hard_target, len(pair_data['hard_negative']))
-            # Take top N hardest (already sorted by score descending)
-            selected_negatives.extend(pair_data['hard_negative'][:n_hard])
-
-        # Sample easy negatives (random)
-        if pair_data['negative']:
-            # If we couldn't get enough hard negatives, compensate with easy ones
-            n_easy_actual = self.negatives_per_positive - len(selected_negatives)
-            n_easy_actual = min(n_easy_actual, len(pair_data['negative']))
-
-            if n_easy_actual > 0:
-                # Sample without replacement if possible
-                replace = len(pair_data['negative']) < n_easy_actual
-
-                if replace:
-                    # Sample with replacement
-                    easy_indices = np.random.choice(
-                        len(pair_data['negative']),
-                        size=n_easy_actual,
-                        replace=True
-                    )
+        
+        if self.max_negatives_per_positive is None:
+            # Use ALL available negatives
+            selected_negatives.extend(available_hard)
+            selected_negatives.extend(available_easy)
+        else:
+            # Sample up to max, respecting ratio
+            n_hard_target = int(self.max_negatives_per_positive * self.hard_negative_ratio)
+            n_easy_target = self.max_negatives_per_positive - n_hard_target
+            
+            # Sample hard negatives
+            if available_hard:
+                n_hard = min(n_hard_target, len(available_hard))
+                selected_negatives.extend(available_hard[:n_hard])  # Take top N hardest
+            
+            # Sample easy negatives
+            if available_easy:
+                n_easy_actual = min(n_easy_target, len(available_easy))
+                if len(available_easy) <= n_easy_actual:
+                    selected_negatives.extend(available_easy)
                 else:
-                    # Sample without replacement
                     easy_indices = np.random.choice(
-                        len(pair_data['negative']),
+                        len(available_easy),
                         size=n_easy_actual,
                         replace=False
                     )
-
-                selected_negatives.extend([pair_data['negative'][i] for i in easy_indices])
-
-        # If still not enough negatives, warn and proceed with what we have
-        if len(selected_negatives) < self.negatives_per_positive:
-            # Could optionally duplicate some negatives here
-            # For now, just proceed with what we have
-            pass
-
+                    selected_negatives.extend([available_easy[i] for i in easy_indices])
+        
         # Combine and shuffle
         all_samples = [pos_sample] + selected_negatives
         shuffle_indices = np.random.permutation(len(all_samples))
         all_samples = [all_samples[i] for i in shuffle_indices]
         original_positions = shuffle_indices.tolist()
-
-        # Process samples
+        
+        # Process samples (same as before)
         batch = {
             'rgb': [],
             'rgb_geometric': [],
@@ -386,16 +364,16 @@ class PrecomposedAlignmentDataset(Dataset):
             'difficulties': [],
             'positions': []
         }
-
+        
         for sample, pos in zip(all_samples, original_positions):
             rgb, rgb_geom = self._process_sample(sample)
-
+            
             batch['rgb'].append(rgb)
             batch['rgb_geometric'].append(rgb_geom)
             batch['labels'].append(sample['label'])
             batch['difficulties'].append(sample['category'])
             batch['positions'].append(pos)
-
+        
         result = {
             'rgb': torch.stack(batch['rgb']),
             'rgb_geometric': torch.stack(batch['rgb_geometric']),
@@ -405,7 +383,7 @@ class PrecomposedAlignmentDataset(Dataset):
             'pair_key': pair_key
         }
 
-        return result
+        return result 
 
     def _process_sample(self, sample):
         """
@@ -638,7 +616,7 @@ class PrecomposedAlignmentDataset(Dataset):
         # Create new instance (shallow copy)
         new_dataset = PrecomposedAlignmentDataset.__new__(PrecomposedAlignmentDataset)
         new_dataset.data_root = self.data_root
-        new_dataset.negatives_per_positive = self.negatives_per_positive
+        new_dataset.max_negatives_per_positive = self.max_negatives_per_positive
         new_dataset.hard_negative_ratio = self.hard_negative_ratio
         new_dataset.transform = self.transform
         new_dataset.pairs = self.pairs  # Share the pairs dict (read-only)
