@@ -119,7 +119,7 @@ def train_model(
 
     print(f"Training {model_name} for up to {num_epochs} epochs")
     print(f"Early stopping patience: {early_stopping_patience}")
-    print(f"Loss: BCE={bce_weight} + AdaptiveTopNRankingLoss={ranking_weight}")
+    print(f"Loss: BCE*{bce_weight} + AdaptiveTopNRankingLoss*{ranking_weight} + PerceptualBoundaryLoss*{boundary_weight}")
     print(f"  AdaptiveTopNRankingLoss: top_n={top_n}, margin={ranking_margin}, temperature={temperature}")
     print(f"Train samples: {len(train_dataset)} pairs")
     print(f"Val samples: {len(val_dataset)} pairs")
@@ -203,6 +203,7 @@ def train_model(
                 rgb_geometric = batch["rgb_geometric"].to(device)
                 labels = batch["labels"].to(device).unsqueeze(1)
                 difficulties = batch["difficulties"]
+                group_sizes = batch['group_sizes']
 
                 if model_name == 'geometric':
                     logits = model(rgb_geometric)

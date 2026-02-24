@@ -538,7 +538,6 @@ class AdaptiveTopNRankingLoss(nn.Module):
             pos_mask = group_labels == 1.0
             if pos_mask.sum() != 1:
                 print(f"⚠️  Warning: Group {group_idx} has {pos_mask.sum().item()} positives")
-                start_idx = end_idx
                 continue
             
             # Get positive and negative scores
@@ -549,7 +548,6 @@ class AdaptiveTopNRankingLoss(nn.Module):
             neg_scores = group_scores[neg_mask]
             
             if len(neg_scores) == 0:
-                start_idx = end_idx
                 continue
             
             # ============================================
@@ -589,9 +587,7 @@ class AdaptiveTopNRankingLoss(nn.Module):
             
             total_loss += group_loss
             num_groups += 1
-            
-            start_idx = end_idx
-        
+                    
         return total_loss / num_groups if num_groups > 0 else torch.tensor(0.0, device=scores.device, requires_grad=True)
 
 # class AdaptiveTopNRankingLoss(nn.Module):
