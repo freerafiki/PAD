@@ -16,7 +16,7 @@ import re
 # Filename Parsing Utilities
 # ============================================================================
 
-def parse_filename(filename):
+def parse_filename(filename, dataset_name:str='wikiart'):
     """
     Parse alignment filename into components.
 
@@ -31,37 +31,132 @@ def parse_filename(filename):
         or None if parsing fails
     """
     basename = Path(filename).stem
+    if dataset_name == 'repair':
+        # Pattern: puzzle_ID_vis_PIECE1_PIECE2_TRANSFORM_SUFFIX
+        pattern = r'(puzzle_\d+_RP_group_\d+)_vis_(\d+_RPf_\d+)_(\d+_RPf_\d+)_(\d+_\d+_\d+)_(.+)$'
 
-    # Pattern: puzzle_ID_vis_PIECE1_PIECE2_TRANSFORM_SUFFIX
-    pattern = r'(puzzle_\d+_RP_group_\d+)_vis_(\d+_RPf_\d+)_(\d+_RPf_\d+)_(\d+_\d+_\d+)_(.+)$'
+        match = re.match(pattern, basename)
 
-    match = re.match(pattern, basename)
+        pattern2 = r'(puzzle_\d+_RP_group_\d+)_(\d+_RPf_\d+)_vs_(\d+_RPf_\d+)_(.+)$'
 
-    pattern2 = r'(puzzle_\d+_RP_group_\d+)_(\d+_RPf_\d+)_vs_(\d+_RPf_\d+)_(.+)$'
-
-    parsed = None
-    if not match:
-        match2 = re.match(pattern2, basename)
-        if not match2:
-            return None
+        parsed = None
+        if not match:
+            match2 = re.match(pattern2, basename)
+            if not match2:
+                return None
+            else:
+                parsed = {
+                    'puzzle_id': match2.group(1),
+                    'piece1_id': match2.group(2),
+                    'piece2_id': match2.group(3),
+                    'transform': "",
+                    'suffix': match2.group(4),
+                    'basename': basename
+                }
         else:
             parsed = {
-                'puzzle_id': match2.group(1),
-                'piece1_id': match2.group(2),
-                'piece2_id': match2.group(3),
-                'transform': "",
-                'suffix': match2.group(4),
+                'puzzle_id': match.group(1),
+                'piece1_id': match.group(2),
+                'piece2_id': match.group(3),
+                'transform': match.group(4),
+                'suffix': match.group(5),
                 'basename': basename
             }
+    elif dataset_name  == 'wikiart':
+        # ─── Regex breakdown ────────────────────────────────────────────────────
+        #
+        # Shared prefix (always the same structure):
+        #   (\d+)          → ID           e.g. 00085
+        #   __P2__         → puzzle type  (literal, or generalize with \w+)
+        #   img__(\d+)     → img number   e.g. 36792
+        #   __             → separator
+        #   (.+?)          → puzzle name  (non-greedy! stops at the next __)
+        #   __pmap__(\d+)  → pmap number  e.g. 06139
+        #   __             → separator
+        #   (\w+)          → size tag     e.g. M, XL, L
+        #
+        # Then the "pieces info" string branches into two shapes:
+        #
+        #   POSITIVE / NEGATIVE  (has _vis_ marker):
+        #     _vis_piece_(\d+)_piece_(\d+)      → piece1, piece2
+        #     _([\d.]+)_([\d.]+)_([-\d.]+)     → tx, ty, rot  (floats + possibly negative)
+        #     _(grid|wrong_\d+|gt)$             → class suffix
+        #
+        #   HARD NEGATIVE (no _vis_, uses _vs_):
+        #     _piece_(\d+)_vs_piece_(\d+)       → piece1, piece2
+        #     _score(\d+)$                      → score (class suffix)
+
+        PREFIX = (
+            r'^(\d+)'           # group 1: ID
+            r'__\w+__'          # puzzle type (P2, etc.) — captured but often not needed
+            r'img__(\d+)'       # group 2: img number
+            r'__'
+            r'(.+?)'            # group 3: puzzle name (non-greedy)
+            r'__pmap__(\d+)'    # group 4: pmap number
+            r'__'
+            r'(\w+)'            # group 5: size tag
+        )
+
+        PATTERN_VIS = re.compile(
+            PREFIX
+            + r'_vis_piece_(\d+)_piece_(\d+)'      # groups 6, 7: piece ids
+            + r'_([\d.]+)_([\d.]+)_([-\d.]+)'     # groups 8, 9, 10: tx, ty, rotation
+            + r'_(grid|wrong_\d+|gt)$'            # group 11: class suffix
+        )
+
+        PATTERN_VS = re.compile(
+            PREFIX
+            + r'_piece_(\d+)_vs_piece_(\d+)'      # groups 6, 7: piece ids
+            + r'_score(\d+)$'                     # group 8: score value
+        )
+
+        # Try positive / negative pattern first
+        m = PATTERN_VIS.match(basename)
+        if m:
+            suffix = m.group(11)
+
+            if suffix == 'gt':
+                return None  # skip gt samples
+
+            label = 'positive' if suffix == 'grid' else 'negative'
+
+            return {
+                'puzzle_id':    m.group(1),
+                'img_num':      m.group(2),
+                'puzzle_name':  m.group(3),
+                'pmap_num':     m.group(4),
+                'size':         m.group(5),
+                'piece1_id':    m.group(6),
+                'piece2_id':    m.group(7),
+                'transform':    (float(m.group(8)), float(m.group(9)), float(m.group(10))),
+                'suffix':       suffix,
+                'label':        label,
+                'basename':     basename,
+            }
+
+        # Try hard negative pattern
+        m = PATTERN_VS.match(basename)
+        if m:
+            return {
+                'puzzle_id':    m.group(1),
+                'img_num':      m.group(2),
+                'puzzle_name':  m.group(3),
+                'pmap_num':     m.group(4),
+                'size':         m.group(5),
+                'piece1_id':    m.group(6),
+                'piece2_id':    m.group(7),
+                'transform':    None,          # hard negatives have no transform
+                'suffix':       f'score{m.group(8)}',
+                'label':        'hard_negative',
+                'basename':     basename,
+            }
+
+        return None  # unrecognized format
+
     else:
-        parsed = {
-            'puzzle_id': match.group(1),
-            'piece1_id': match.group(2),
-            'piece2_id': match.group(3),
-            'transform': match.group(4),
-            'suffix': match.group(5),
-            'basename': basename
-        }
+        # TODO: parse only suffix?
+        print(f"Did not find any `parse_filename` implementation for dataset `{dataset_name}`. Please check the name or add implementation!")
+        print("TODO")
     return parsed
 
 
@@ -89,16 +184,21 @@ def classify_file(filename):
     if not parsed:
         return 'ignore'
 
-    suffix = parsed['suffix']
+    # if we have the label already we can use
+    if 'label' in parsed.keys():
+        return parsed['label'] 
+    # otherwise infer it from suffix
+    else:
+        suffix = parsed['suffix']
 
-    if suffix == 'gt':
-        return 'positive'
+        if suffix == 'gt':
+            return 'positive'
 
-    if re.match(r'score\d+', suffix):
-        return 'hard_negative'
+        if re.match(r'score\d+', suffix):
+            return 'hard_negative'
 
-    if re.match(r'wrong_\d+', suffix):
-        return 'negative'
+        if re.match(r'wrong_\d+', suffix):
+            return 'negative'
 
     # Ignore grid visualizations and unknown types
     return 'ignore'
@@ -165,6 +265,7 @@ class PrecomposedAlignmentDataset(Dataset):
                  data_root,
                  max_negatives_per_positive=None,  # None = use all available
                  hard_negative_ratio=0.6,
+                 dataset_name=None,
                  radius=20,
                  threshold=15,
                  transform=None):
@@ -179,6 +280,7 @@ class PrecomposedAlignmentDataset(Dataset):
         self.hard_negative_ratio = hard_negative_ratio
         self.radius = radius
         self.threshold = threshold
+        self.name = dataset_name
 
         self.transform = transform or transforms.Compose([
             transforms.Resize((224, 224)),
@@ -204,6 +306,7 @@ class PrecomposedAlignmentDataset(Dataset):
         Returns:
             dict: {pair_key: {'positive': [...], 'negative': [...], 'hard_negative': [...]}}
         """
+        # breakpoint()
         pairs = {}
 
         for category in ['positive', 'negative', 'hard_negative']:

@@ -1,21 +1,24 @@
 from torch.utils.data import DataLoader
-from dataset_v3 import PrecomposedAlignmentDataset, collate_alignment_samples
+from dataset_v3 import PrecomposedAlignmentDataset, collate_alignment_samples, ShuffledBatchSampler
 import matplotlib.pyplot as plt
 import numpy as np
 
+
+# dataset_name = 'escher'
 # Create dataset
 dataset = PrecomposedAlignmentDataset(
-    data_root='/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4',
-    negatives_per_positive=4,  # Will sample 3 hard + 3 easy
-    radius = 30,
-    threshold = 30
+    data_root='/media/lucap/big_data/datasets/wikiart_PAD/PAD_dataset__Wikiart',
+    # '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4',
+    max_negatives_per_positive=15,  # Will sample 3 hard + 3 easy
+    radius = 50,
+    threshold = 50
 )
 
 # Create dataloader
 dataloader = DataLoader(
     dataset,
     batch_size=4,  # 4 positives, each with 6 negatives = 28 total samples per batch
-    shuffle=True,
+    shuffle=False,
     sampler=ShuffledBatchSampler(dataset, shuffle=True, seed=42),  # *** NEW ***
     collate_fn=collate_alignment_samples,
     num_workers=4

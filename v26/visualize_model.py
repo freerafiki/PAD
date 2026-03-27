@@ -895,13 +895,13 @@ def main(args):
     model = load_model(args.model, args.model_type, device)
 
      # DATASET PARAMETERS
-    RADIUS = 60
-    THRESHOLD = 60
+    RADIUS = 50
+    THRESHOLD = 50
 
     # Load dataset (use validation set for visualization)
     full_dataset = PrecomposedAlignmentDataset(
         data_root=args.data_root,
-        negatives_per_positive=6,
+        max_negatives_per_positive=12,
         radius=RADIUS,
         threshold=THRESHOLD,
     )

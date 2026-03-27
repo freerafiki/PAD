@@ -138,7 +138,7 @@ def train_model(
     batch_size=32,
     lr=1e-4,
     device='cuda',
-    save_dir='checkpoints/run3_v3',
+    save_dir='checkpoints/wikiart',
     model_name='model'
 ):
     """
@@ -356,12 +356,13 @@ def main():
     """Main training script."""
 
     # Configuration
-    DATA_ROOT = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4'
-    BATCH_SIZE = 16
-    NUM_EPOCHS = 5
+    DATA_ROOT = '/media/lucap/big_data/datasets/wikiart_PAD/PAD_dataset__Wikiart'
+    # DATA_ROOT = '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4'
+    BATCH_SIZE = 8
+    NUM_EPOCHS = 10
     LEARNING_RATE = 1e-4
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    NEGATIVES_PER_POSITIVE = 4  # Adjusted for your data size
+    MAX_NEGATIVES_PER_POSITIVE = 12  # Adjusted for your data size
 
     # DATASET PARAMETERS
     RADIUS = 30
@@ -375,7 +376,7 @@ def main():
     # Load full dataset
     full_dataset = PrecomposedAlignmentDataset(
         data_root=DATA_ROOT,
-        negatives_per_positive=NEGATIVES_PER_POSITIVE,
+        max_negatives_per_positive=MAX_NEGATIVES_PER_POSITIVE,
         hard_negative_ratio=0.6,
         radius = RADIUS,
         threshold = THRESHOLD
@@ -459,8 +460,8 @@ def main():
     print("\n" + "="*60)
     print("FINAL COMPARISON")
     print("="*60)
-    # print(f"Baseline (RGB only):      {max(history_v1['val_accuracy']):.3f}")
-    # print(f"+ Geometry:               {max(history_v2['val_accuracy']):.3f}")
+    print(f"Baseline (RGB only):      {max(history_v1['val_accuracy']):.3f}")
+    print(f"+ Geometry:               {max(history_v2['val_accuracy']):.3f}")
     print(f"+ DINO:                   {max(history_v3['val_accuracy']):.3f}")
 
 

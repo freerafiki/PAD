@@ -230,9 +230,9 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
                 pos_idx_in_group = np.where(pos_mask)[0][0]
                 pos_score = group_scores[pos_idx_in_group]
                 
-                # Check if positive has highest score
-                if pos_score == group_scores.max():
-                    correct += 1
+                # # Check if positive has highest score
+                # if pos_score == group_scores.max():
+                #     correct += 1
                 
                 total_groups += 1
                 

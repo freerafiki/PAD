@@ -212,7 +212,7 @@ def train_model(
                 scores = torch.sigmoid(logits).squeeze()
 
                 bce_loss = bce_criterion(logits, labels)
-                ranking_loss = ranking_criterion(scores, labels.squeeze(), difficulties)
+                ranking_loss = ranking_criterion(scores, labels.squeeze(), difficulties, group_sizes=group_sizes)
                 loss = bce_weight * bce_loss + ranking_weight * ranking_loss
 
                 val_loss += loss.item()
@@ -289,17 +289,18 @@ def main():
     """Main training script."""
 
     # Configuration
-    DATA_ROOT = "/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4"
+    DATA_ROOT = "/media/lucap/big_data/datasets/wikiart_PAD/PAD_dataset__Wikiart"
+    # "/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4"
     BATCH_SIZE = 4
     NUM_EPOCHS = 10
     LEARNING_RATE = 1e-4
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    MAX_NEGATIVES_PER_POSITIVE = 15 # use all available
+    MAX_NEGATIVES_PER_POSITIVE = 12 # use all available
       # Adjusted for your data size
 
     # DATASET PARAMETERS
-    RADIUS = 80
-    THRESHOLD = 100
+    RADIUS = 50
+    THRESHOLD = 50
 
     # DINO PARAMETERS
     DINO_MODEL = "facebook/dinov2-base"
@@ -322,6 +323,8 @@ def main():
     print(f"\n=== Dataset Ready ===")
     print(f"Train: {len(train_dataset)} pairs")
     print(f"Val: {len(val_dataset)} pairs")
+
+    breakpoint()
 
     # Verify no overlap
     train_puzzles = set(k.split("|")[0] for k in train_dataset.pair_keys)
