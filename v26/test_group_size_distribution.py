@@ -41,7 +41,7 @@ def analyze_group_size_distribution(dataset):
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
             fontsize=12)
     
-    plt.savefig('group_size_distribution.png', dpi=150, bbox_inches='tight')
+    plt.savefig('dataloader_vis/group_size_distribution_wikiart.png', dpi=150, bbox_inches='tight')
     print("Saved distribution plot to group_size_distribution.png")
     
     # Show pairs with very few or very many negatives
@@ -61,7 +61,8 @@ def analyze_group_size_distribution(dataset):
             print(f"  Pair {idx} ({sample['pair_key']}): {group_sizes[idx]} samples")
 
 # Use it
-DATA_ROOT = "/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4"
+# DATA_ROOT = "/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4"
+DATA_ROOT = '/media/lucap/big_data/datasets/wikiart_PAD/PAD_dataset__Wikiart'
 
 dataset = PrecomposedAlignmentDataset(
     data_root=DATA_ROOT,

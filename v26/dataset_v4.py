@@ -16,43 +16,157 @@ from torch.utils.data import Dataset
 import numpy as np
 from PIL import Image
 from pathlib import Path
-from scipy.ndimage import distance_transform_edt, binary_erosion
+from scipy.ndimage import distance_transform_edt
 import torchvision.transforms as transforms
 import re
-
+from torch.utils.data import Sampler
 
 # ============================================================================
 # Filename Parsing Utilities
 # ============================================================================
 
-def parse_filename(filename):
+def parse_filename(filename, dataset_name:str='wikiart'):
     """
     Parse alignment filename into components.
 
-    Example: "puzzle_0000029_RP_group_28_vis_8_RPf_00202_7_RPf_00201_493_411_0_gt.png"
+    Example: 
+    positive and negatives have:
+    "puzzle_0000029_RP_group_28_vis_8_RPf_00202_7_RPf_00201_493_411_0_gt.png"
+    hard_negatives have:
+    'puzzle_0000001_RP_group_1_1_RPf_00002_vs_8_RPf_00009_score61.png'
 
     Returns:
         dict with puzzle_id, piece1_id, piece2_id, transform, suffix
         or None if parsing fails
     """
     basename = Path(filename).stem
+    if dataset_name == 'repair':
+        # Pattern: puzzle_ID_vis_PIECE1_PIECE2_TRANSFORM_SUFFIX
+        pattern = r'(puzzle_\d+_RP_group_\d+)_vis_(\d+_RPf_\d+)_(\d+_RPf_\d+)_(\d+_\d+_\d+)_(.+)$'
 
-    # Pattern: puzzle_ID_vis_PIECE1_PIECE2_TRANSFORM_SUFFIX
-    pattern = r'(puzzle_\d+_RP_group_\d+)_vis_(\d+_RPf_\d+)_(\d+_RPf_\d+)_(\d+_\d+_\d+)_(.+)$'
+        match = re.match(pattern, basename)
 
-    match = re.match(pattern, basename)
+        pattern2 = r'(puzzle_\d+_RP_group_\d+)_(\d+_RPf_\d+)_vs_(\d+_RPf_\d+)_(.+)$'
 
-    if not match:
-        return None
+        parsed = None
+        if not match:
+            match2 = re.match(pattern2, basename)
+            if not match2:
+                return None
+            else:
+                parsed = {
+                    'puzzle_id': match2.group(1),
+                    'piece1_id': match2.group(2),
+                    'piece2_id': match2.group(3),
+                    'transform': "",
+                    'suffix': match2.group(4),
+                    'basename': basename
+                }
+        else:
+            parsed = {
+                'puzzle_id': match.group(1),
+                'piece1_id': match.group(2),
+                'piece2_id': match.group(3),
+                'transform': match.group(4),
+                'suffix': match.group(5),
+                'basename': basename
+            }
+    elif dataset_name  == 'wikiart':
+        # ─── Regex breakdown ────────────────────────────────────────────────────
+        #
+        # Shared prefix (always the same structure):
+        #   (\d+)          → ID           e.g. 00085
+        #   __P2__         → puzzle type  (literal, or generalize with \w+)
+        #   img__(\d+)     → img number   e.g. 36792
+        #   __             → separator
+        #   (.+?)          → puzzle name  (non-greedy! stops at the next __)
+        #   __pmap__(\d+)  → pmap number  e.g. 06139
+        #   __             → separator
+        #   (\w+)          → size tag     e.g. M, XL, L
+        #
+        # Then the "pieces info" string branches into two shapes:
+        #
+        #   POSITIVE / NEGATIVE  (has _vis_ marker):
+        #     _vis_piece_(\d+)_piece_(\d+)      → piece1, piece2
+        #     _([\d.]+)_([\d.]+)_([-\d.]+)     → tx, ty, rot  (floats + possibly negative)
+        #     _(grid|wrong_\d+|gt)$             → class suffix
+        #
+        #   HARD NEGATIVE (no _vis_, uses _vs_):
+        #     _piece_(\d+)_vs_piece_(\d+)       → piece1, piece2
+        #     _score(\d+)$                      → score (class suffix)
 
-    return {
-        'puzzle_id': match.group(1),
-        'piece1_id': match.group(2),
-        'piece2_id': match.group(3),
-        'transform': match.group(4),
-        'suffix': match.group(5),
-        'basename': basename
-    }
+        PREFIX = (
+            r'^(\d+)'           # group 1: ID
+            r'__\w+__'          # puzzle type (P2, etc.) — captured but often not needed
+            r'img__(\d+)'       # group 2: img number
+            r'__'
+            r'(.+?)'            # group 3: puzzle name (non-greedy)
+            r'__pmap__(\d+)'    # group 4: pmap number
+            r'__'
+            r'(\w+)'            # group 5: size tag
+        )
+
+        PATTERN_VIS = re.compile(
+            PREFIX
+            + r'_vis_piece_(\d+)_piece_(\d+)'      # groups 6, 7: piece ids
+            + r'_([\d.]+)_([\d.]+)_([-\d.]+)'     # groups 8, 9, 10: tx, ty, rotation
+            + r'_(grid|wrong_\d+|gt)$'            # group 11: class suffix
+        )
+
+        PATTERN_VS = re.compile(
+            PREFIX
+            + r'_piece_(\d+)_vs_piece_(\d+)'      # groups 6, 7: piece ids
+            + r'_score(\d+)$'                     # group 8: score value
+        )
+
+        # Try positive / negative pattern first
+        m = PATTERN_VIS.match(basename)
+        if m:
+            suffix = m.group(11)
+
+            if suffix == 'gt':
+                return None  # skip gt samples
+
+            label = 'positive' if suffix == 'grid' else 'negative'
+
+            return {
+                'puzzle_id':    m.group(1),
+                'img_num':      m.group(2),
+                'puzzle_name':  m.group(3),
+                'pmap_num':     m.group(4),
+                'size':         m.group(5),
+                'piece1_id':    m.group(6),
+                'piece2_id':    m.group(7),
+                'transform':    (float(m.group(8)), float(m.group(9)), float(m.group(10))),
+                'suffix':       suffix,
+                'label':        label,
+                'basename':     basename,
+            }
+
+        # Try hard negative pattern
+        m = PATTERN_VS.match(basename)
+        if m:
+            return {
+                'puzzle_id':    m.group(1),
+                'img_num':      m.group(2),
+                'puzzle_name':  m.group(3),
+                'pmap_num':     m.group(4),
+                'size':         m.group(5),
+                'piece1_id':    m.group(6),
+                'piece2_id':    m.group(7),
+                'transform':    None,          # hard negatives have no transform
+                'suffix':       f'score{m.group(8)}',
+                'label':        'hard_negative',
+                'basename':     basename,
+            }
+
+        return None  # unrecognized format
+
+    else:
+        # TODO: parse only suffix?
+        print(f"Did not find any `parse_filename` implementation for dataset `{dataset_name}`. Please check the name or add implementation!")
+        print("TODO")
+    return parsed
 
 
 def get_pair_key(filename):
@@ -62,6 +176,7 @@ def get_pair_key(filename):
     Returns: "puzzle_id|piece1|piece2" (pieces sorted for consistency)
     """
     parsed = parse_filename(filename)
+
     if not parsed:
         return None
 
@@ -83,8 +198,8 @@ def classify_file(filename, is_non_neighbour_folder=False):
         Category string
     """
     # If from non_neighbour folder, always classify as non_neighbour
-    if is_non_neighbour_folder:
-        return 'non_neighbour'
+    # if is_non_neighbour_folder:
+    #     return 'non_neighbour'
     
     parsed = parse_filename(filename)
     if not parsed:
@@ -92,7 +207,7 @@ def classify_file(filename, is_non_neighbour_folder=False):
 
     suffix = parsed['suffix']
 
-    if suffix == 'gt':
+    if suffix == 'grid':
         return 'positive'
 
     if re.match(r'score\d+', suffix):
@@ -101,9 +216,9 @@ def classify_file(filename, is_non_neighbour_folder=False):
     if re.match(r'wrong_\d+', suffix):
         return 'negative'
     
-    # Check for non_neighbour suffix pattern (e.g., "non_neighbour" or "non_neighbor")
-    if 'non_neighbour' in suffix or 'non_neighbor' in suffix:
-        return 'non_neighbour'
+    # # Check for non_neighbour suffix pattern (e.g., "non_neighbour" or "non_neighbor")
+    # if 'non_neighbour' in suffix or 'non_neighbor' in suffix:
+    #     return 'non_neighbour'
 
     # Ignore grid visualizations and unknown types
     return 'ignore'
@@ -125,6 +240,39 @@ def get_difficulty_score(filename):
         return int(match.group(1))
 
     return None
+
+# ============================================================================
+# Custom Shuffler
+# ============================================================================
+
+class ShuffledBatchSampler(Sampler):
+    """
+    Sampler that shuffles pairs, but keeps samples within each pair together.
+
+    Each 'batch' is one pair (multiple samples), and we shuffle the order of pairs.
+    """
+
+    def __init__(self, dataset, shuffle=True, seed=None):
+        self.dataset = dataset
+        self.shuffle = shuffle
+        self.seed = seed
+
+        # Number of pairs
+        self.num_pairs = len(dataset)
+
+    def __iter__(self):
+        if self.shuffle:
+            # Shuffle pair indices
+            if self.seed is not None:
+                np.random.seed(self.seed)
+            indices = np.random.permutation(self.num_pairs).tolist()
+        else:
+            indices = list(range(self.num_pairs))
+
+        return iter(indices)
+
+    def __len__(self):
+        return self.num_pairs
 
 
 # ============================================================================
@@ -148,13 +296,10 @@ class PrecomposedAlignmentDataset(Dataset):
 
     def __init__(self,
                  data_root,
-                 negatives_per_positive=4,
-                 hard_negative_ratio=0.6,
+                 max_negatives_per_positive=4,
                  radius=20,
                  threshold=15,
-                 transform=None,
-                 include_non_neighbours=False,
-                 non_neighbour_ratio=0.2):
+                 transform=None):
         """
         Args:
             data_root: Path to data directory with positive/negative/hard_negative/non_neighbour folders
@@ -167,12 +312,9 @@ class PrecomposedAlignmentDataset(Dataset):
             non_neighbour_ratio: Fraction of batches that should be non-neighbour (0.0-1.0)
         """
         self.data_root = Path(data_root)
-        self.negatives_per_positive = negatives_per_positive
-        self.hard_negative_ratio = hard_negative_ratio
+        self.max_negatives_per_positive = max_negatives_per_positive
         self.radius = radius
         self.threshold = threshold
-        self.include_non_neighbours = include_non_neighbours
-        self.non_neighbour_ratio = non_neighbour_ratio
 
         self.transform = transform or transforms.Compose([
             transforms.Resize((224, 224)),
@@ -186,26 +328,26 @@ class PrecomposedAlignmentDataset(Dataset):
         self.pairs = self._group_by_pairs()
         
         # Store non-neighbour pairs separately
-        self.non_neighbour_pairs = self.pairs.pop('non_neighbour', {})
+        # self.non_neighbour_pairs = self.pairs.pop('non_neighbour', {})
 
         # Statistics
         self._print_statistics()
 
         # Convert to list for indexing
         self.pair_keys = list(self.pairs.keys())
-        self.non_neighbour_keys = list(self.non_neighbour_pairs.keys())
+        # self.non_neighbour_keys = list(self.non_neighbour_pairs.keys())
         
         # Pre-compute which indices are non-neighbour
         self._non_neighbour_indices = set()
-        if self.include_non_neighbours and self.non_neighbour_keys:
-            # Calculate how many non-neighbour batches to include
-            total_standard = len(self.pair_keys)
-            n_non_neighbour = int(total_standard * self.non_neighbour_ratio)
-            n_non_neighbour = min(n_non_neighbour, len(self.non_neighbour_keys))
+        # if self.include_non_neighbours and self.non_neighbour_keys:
+        #     # Calculate how many non-neighbour batches to include
+        #     total_standard = len(self.pair_keys)
+        #     n_non_neighbour = int(total_standard * self.non_neighbour_ratio)
+        #     n_non_neighbour = min(n_non_neighbour, len(self.non_neighbour_keys))
             
-            # Create mapping for non-neighbour indices
-            # We'll use a probabilistic approach in __getitem__
-            pass
+        #     # Create mapping for non-neighbour indices
+        #     # We'll use a probabilistic approach in __getitem__
+        #     pass
 
     def _group_by_pairs(self):
         """
@@ -225,7 +367,7 @@ class PrecomposedAlignmentDataset(Dataset):
             if not images_dir.exists():
                 print(f"Warning: {images_dir} does not exist")
                 continue
-
+            
             for img_path in images_dir.glob('*.png'):
                 # Classify file
                 file_type = classify_file(img_path.name)
@@ -269,68 +411,77 @@ class PrecomposedAlignmentDataset(Dataset):
                     'label': 1.0 if file_type == 'positive' else 0.0
                 })
         
-        # Process non-neighbour category
-        non_neighbour_dir = self.data_root / 'non_neighbour'
-        if non_neighbour_dir.exists():
-            images_dir = non_neighbour_dir / 'images'
-            masks_dir = non_neighbour_dir / 'masks'
+        # # Process non-neighbour category
+        # non_neighbour_dir = self.data_root / 'non_neighbour'
+        # if non_neighbour_dir.exists():
+        #     images_dir = non_neighbour_dir / 'images'
+        #     masks_dir = non_neighbour_dir / 'masks'
             
-            if images_dir.exists():
-                for img_path in images_dir.glob('*.png'):
-                    # Classify as non_neighbour
-                    file_type = classify_file(img_path.name, is_non_neighbour_folder=True)
+        #     if images_dir.exists():
+        #         for img_path in images_dir.glob('*.png'):
+        #             # Classify as non_neighbour
+        #             file_type = classify_file(img_path.name, is_non_neighbour_folder=True)
                     
-                    # Get pair identifier (may be from different puzzles)
-                    pair_key = get_pair_key(img_path.name)
-                    if not pair_key:
-                        # For non-neighbours, create a unique key from filename
-                        pair_key = f"non_neighbour_{img_path.stem}"
+        #             # Get pair identifier (may be from different puzzles)
+        #             pair_key = get_pair_key(img_path.name)
+        #             if not pair_key:
+        #                 # For non-neighbours, create a unique key from filename
+        #                 pair_key = f"non_neighbour_{img_path.stem}"
                     
-                    # Check mask exists
-                    mask_path = masks_dir / img_path.name
-                    if not mask_path.exists():
-                        print(f"Warning: No mask for {img_path.name}")
-                        continue
+        #             # Check mask exists
+        #             mask_path = masks_dir / img_path.name
+        #             if not mask_path.exists():
+        #                 print(f"Warning: No mask for {img_path.name}")
+        #                 continue
                     
-                    # Parse metadata (may fail for non-standard names)
-                    parsed = parse_filename(img_path.name)
+        #             # Parse metadata (may fail for non-standard names)
+        #             parsed = parse_filename(img_path.name)
                     
-                    # Initialize non-neighbour pair entry
-                    if pair_key not in non_neighbour_pairs:
-                        non_neighbour_pairs[pair_key] = {
-                            'samples': []
-                        }
+        #             # Initialize non-neighbour pair entry
+        #             if pair_key not in non_neighbour_pairs:
+        #                 non_neighbour_pairs[pair_key] = {
+        #                     'samples': []
+        #                 }
                     
-                    # Add sample
-                    non_neighbour_pairs[pair_key]['samples'].append({
-                        'image_path': str(img_path),
-                        'mask_path': str(mask_path),
-                        'pair_key': pair_key,
-                        'puzzle_id': parsed['puzzle_id'] if parsed else 'unknown',
-                        'piece1_id': parsed['piece1_id'] if parsed else 'unknown',
-                        'piece2_id': parsed['piece2_id'] if parsed else 'unknown',
-                        'difficulty_score': None,
-                        'category': 'non_neighbour',
-                        'label': 0.0  # All non-neighbour samples have label 0
-                    })
-            else:
-                print(f"Warning: {images_dir} does not exist")
-        else:
-            print(f"Info: No non_neighbour directory found at {non_neighbour_dir}")
+        #             # Add sample
+        #             non_neighbour_pairs[pair_key]['samples'].append({
+        #                 'image_path': str(img_path),
+        #                 'mask_path': str(mask_path),
+        #                 'pair_key': pair_key,
+        #                 'puzzle_id': parsed['puzzle_id'] if parsed else 'unknown',
+        #                 'piece1_id': parsed['piece1_id'] if parsed else 'unknown',
+        #                 'piece2_id': parsed['piece2_id'] if parsed else 'unknown',
+        #                 'difficulty_score': None,
+        #                 'category': 'non_neighbour',
+        #                 'label': 0.0  # All non-neighbour samples have label 0
+        #             })
+        #     else:
+        #         print(f"Warning: {images_dir} does not exist")
+        # else:
+        #     print(f"Info: No non_neighbour directory found at {non_neighbour_dir}")
 
         # Sort hard negatives by difficulty score (highest = hardest)
+        self.neighbour_pairs = 0
+        self.non_neighbour_pairs = 0
         for pair_data in pairs.values():
             if pair_data['hard_negative']:
                 pair_data['hard_negative'].sort(
                     key=lambda x: x.get('difficulty_score', 0),
                     reverse=True
                 )
+            if len(pair_data['positive']) == 0:
+                pair_data['non_neighbours'] = True
+                self.non_neighbour_pairs += 1
+            else:
+                pair_data['non_neighbours'] = False
+                self.neighbour_pairs += 1
+
 
         # Filter: only keep pairs with at least 1 positive
-        pairs = {k: v for k, v in pairs.items() if len(v['positive']) > 0}
+        # pairs = {k: v for k, v in pairs.items()} # if len(v['positive']) > 0}
         
         # Store non_neighbour pairs in main dict for unified access
-        pairs['non_neighbour'] = non_neighbour_pairs
+        # pairs['non_neighbour'] = non_neighbour_pairs
 
         return pairs
 
@@ -340,28 +491,26 @@ class PrecomposedAlignmentDataset(Dataset):
         total_pos = sum(len(p['positive']) for p in self.pairs.values() if 'positive' in p)
         total_neg = sum(len(p['negative']) for p in self.pairs.values() if 'negative' in p)
         total_hard = sum(len(p['hard_negative']) for p in self.pairs.values() if 'hard_negative' in p)
-        
-        # Non-neighbour statistics
-        total_non_neighbour = sum(len(p['samples']) for p in self.non_neighbour_pairs.values())
 
-        print(f"\nDataset Statistics:")
-        print(f"  Unique piece pairs: {len(self.pairs)}")
+        print("\nDataset Statistics:")
+        tot_samples = len(self.pairs)
+        print(f"  Unique piece pairs: {tot_samples}")
+        print(f"    Neighbour pairs: {(self.neighbour_pairs)}")
+        print(f"    Non Neighbour pairs: {(self.non_neighbour_pairs)}")
+        print(f"    Neigh / Non-Neigh split: {(self.neighbour_pairs / tot_samples):.2%} / {(self.non_neighbour_pairs / tot_samples):.2%}")
+        print(f"    Non-Neighbour percentage: {(self.non_neighbour_pairs / tot_samples):.2%}")
         print(f"  Total positive samples: {total_pos}")
         print(f"  Total negative samples: {total_neg}")
         print(f"  Total hard negative samples: {total_hard}")
-        print(f"  Total non-neighbour samples: {total_non_neighbour}")
-        print(f"  Unique non-neighbour pairs: {len(self.non_neighbour_pairs)}")
-        print(f"  Avg negatives per pair: {(total_neg + total_hard) / max(len(self.pairs), 1):.2f}")
-        
-        if self.include_non_neighbours:
-            print(f"  Non-neighbour ratio: {self.non_neighbour_ratio:.2%}")
+        print(f"    Avg negatives per pair: {(total_neg + total_hard) / max(len(self.pairs), 1):.2f}")
+
 
         # Check pairs with insufficient negatives
         insufficient = sum(1 for p in self.pairs.values()
                           if 'negative' in p and 'hard_negative' in p and
-                          len(p['negative']) + len(p['hard_negative']) < self.negatives_per_positive)
+                          len(p['negative']) + len(p['hard_negative']) < 5)
         if insufficient > 0:
-            print(f"  Warning: {insufficient} pairs have fewer than {self.negatives_per_positive} negatives")
+            print(f"  Warning: {insufficient} pairs have fewer than {5} negatives")
             print(f"    (will use sampling with replacement for these)")
 
     def __len__(self):
@@ -372,11 +521,6 @@ class PrecomposedAlignmentDataset(Dataset):
         for non-neighbour batches.
         """
         base_len = len(self.pair_keys)
-        if self.include_non_neighbours and self.non_neighbour_keys:
-            # Add non-neighbour batches to the total
-            n_non_neighbour = int(base_len * self.non_neighbour_ratio)
-            n_non_neighbour = min(n_non_neighbour, len(self.non_neighbour_keys))
-            return base_len + n_non_neighbour
         return base_len
 
     def __getitem__(self, idx):

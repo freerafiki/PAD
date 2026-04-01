@@ -405,39 +405,39 @@ def main():
     else:
         print("✓ No puzzle overlap between train and val")
 
-    # # Train Version 1: Baseline (RGB only)
-    # print("\n" + "="*60)
-    # print("TRAINING VERSION 1: Baseline (RGB only)")
-    # print("="*60)
+    # Train Version 1: Baseline (RGB only)
+    print("\n" + "="*60)
+    print("TRAINING VERSION 1: Baseline (RGB only)")
+    print("="*60)
 
-    # model_v1 = BaselineScorer()
-    # model_v1, history_v1 = train_model(
-    #     model_v1,
-    #     train_dataset,
-    #     val_dataset,
-    #     num_epochs=NUM_EPOCHS,
-    #     batch_size=BATCH_SIZE,
-    #     lr=LEARNING_RATE,
-    #     device=DEVICE,
-    #     model_name='baseline'
-    # )
+    model_v1 = BaselineScorer()
+    model_v1, history_v1 = train_model(
+        model_v1,
+        train_dataset,
+        val_dataset,
+        num_epochs=NUM_EPOCHS,
+        batch_size=BATCH_SIZE,
+        lr=LEARNING_RATE,
+        device=DEVICE,
+        model_name='baseline'
+    )
 
-    # # Train Version 2: + Geometry
-    # print("\n" + "="*60)
-    # print("TRAINING VERSION 2: RGB + Geometry")
-    # print("="*60)
+    # Train Version 2: + Geometry
+    print("\n" + "="*60)
+    print("TRAINING VERSION 2: RGB + Geometry")
+    print("="*60)
 
-    # model_v2 = GeometricScorer()
-    # model_v2, history_v2 = train_model(
-    #     model_v2,
-    #     train_dataset,
-    #     val_dataset,
-    #     num_epochs=NUM_EPOCHS,
-    #     batch_size=BATCH_SIZE,
-    #     lr=LEARNING_RATE,
-    #     device=DEVICE,
-    #     model_name='geometric'
-    # )
+    model_v2 = GeometricScorer()
+    model_v2, history_v2 = train_model(
+        model_v2,
+        train_dataset,
+        val_dataset,
+        num_epochs=NUM_EPOCHS,
+        batch_size=BATCH_SIZE,
+        lr=LEARNING_RATE,
+        device=DEVICE,
+        model_name='geometric'
+    )
 
     # Train Version 3: + DINO
     print("\n" + "="*60)

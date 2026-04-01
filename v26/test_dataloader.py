@@ -1,8 +1,8 @@
 from torch.utils.data import DataLoader
-from dataset_v3 import PrecomposedAlignmentDataset, collate_alignment_samples, ShuffledBatchSampler
+from dataset_v4 import PrecomposedAlignmentDataset, collate_alignment_samples, ShuffledBatchSampler
 import matplotlib.pyplot as plt
 import numpy as np
-
+import os 
 
 # dataset_name = 'escher'
 # Create dataset
@@ -14,10 +14,12 @@ dataset = PrecomposedAlignmentDataset(
     threshold = 50
 )
 
+breakpoint()
+
 # Create dataloader
 dataloader = DataLoader(
     dataset,
-    batch_size=4,  # 4 positives, each with 6 negatives = 28 total samples per batch
+    batch_size=16,                 
     shuffle=False,
     sampler=ShuffledBatchSampler(dataset, shuffle=True, seed=42),  # *** NEW ***
     collate_fn=collate_alignment_samples,
@@ -42,66 +44,73 @@ for batch in dataloader:
 #         negatives_per_positive=4
 #     )
 
-# Get one batch
-sample = dataset[0]
+dataloader_vis_folder = 'dataloader_vis'
+os.makedirs(dataloader_vis_folder, exist_ok=True)
 
-print(f"Batch contains {len(sample['rgb'])} samples")
-print(f"Labels: {sample['labels']}")
-print(f"Difficulties: {sample['difficulties']}")
+for batch_num in range(0, 100, 25):
+    # Get one batch
+    sample = dataset[3]
 
-# Visualize
-fig, axes = plt.subplots(2, 4, figsize=(15, 6))
+    n_samples = len(sample['rgb'])
+    print(f"Batch contains {len(sample['rgb'])} samples")
+    print(f"Labels: {sample['labels']}")
+    print(f"Difficulties: {sample['difficulties']}")
 
-for i in range(min(4, len(sample['rgb']))):
-    # RGB (denormalize for visualization)
-    rgb = sample['rgb'][i].permute(1, 2, 0).numpy()
-    rgb = rgb * np.array([0.229, 0.224, 0.225]) + np.array([0.485, 0.456, 0.406])
-    rgb = np.clip(rgb, 0, 1)
 
-    axes[0, i].imshow(rgb)
-    axes[0, i].set_title(f"{sample['difficulties'][i]}\nLabel: {sample['labels'][i]:.1f}")
-    axes[0, i].axis('off')
 
-    # Contact region (channel 5 of rgb_geometric)
-    contact = sample['rgb_geometric'][i, 5].numpy()
-    axes[1, i].imshow(contact, cmap='hot')
-    axes[1, i].set_title('Contact Region')
-    axes[1, i].axis('off')
+    # Visualize
+    fig, axes = plt.subplots(2, n_samples, figsize=(15, 6))
 
-plt.tight_layout()
-plt.savefig('dataset_sample.png')
-print("Saved visualization to dataset_sample.png")
+    for i in range(min(n_samples, len(sample['rgb']))):
+        # RGB (denormalize for visualization)
+        rgb = sample['rgb'][i].permute(1, 2, 0).numpy()
+        rgb = rgb * np.array([0.229, 0.224, 0.225]) + np.array([0.485, 0.456, 0.406])
+        rgb = np.clip(rgb, 0, 1)
 
-# Enhanced visualization
-fig, axes = plt.subplots(4, 6, figsize=(15, 9))
+        axes[0, i].imshow(rgb)
+        axes[0, i].set_title(f"{sample['difficulties'][i]}\nLabel: {sample['labels'][i]:.1f}")
+        axes[0, i].axis('off')
 
-for i in range(min(6, len(sample['rgb']))):
-    # RGB
-    rgb = sample['rgb'][i].permute(1, 2, 0).numpy()
-    rgb = rgb * np.array([0.229, 0.224, 0.225]) + np.array([0.485, 0.456, 0.406])
-    rgb = np.clip(rgb, 0, 1)
+        # Contact region (channel 5 of rgb_geometric)
+        contact = sample['rgb_geometric'][i, 5].numpy()
+        axes[1, i].imshow(contact, cmap='hot')
+        axes[1, i].set_title('Contact Region')
+        axes[1, i].axis('off')
 
-    axes[0, i].imshow(rgb)
-    axes[0, i].set_title(f"{sample['difficulties'][i]}")
-    axes[0, i].axis('off')
+    plt.tight_layout()
+    plt.savefig(f'{dataloader_vis_folder}/dataset_sample_b{batch_num}.png')
+    print("Saved visualization to dataset_sample.png")
 
-    # Proximity to A (channel 3)
-    prox_A = sample['rgb_geometric'][i, 3].numpy()
-    axes[1, i].imshow(prox_A, cmap='Reds', vmin=0, vmax=1)
-    axes[1, i].set_title('Proximity to A')
-    axes[1, i].axis('off')
+    # Enhanced visualization
+    fig, axes = plt.subplots(4, n_samples, figsize=(15, 9))
 
-    # Proximity to B (channel 4)
-    prox_B = sample['rgb_geometric'][i, 4].numpy()
-    axes[2, i].imshow(prox_B, cmap='Reds', vmin=0, vmax=1)
-    axes[2, i].set_title('Proximity to B')
-    axes[2, i].axis('off')
+    for i in range(min(n_samples, len(sample['rgb']))):
+        # RGB
+        rgb = sample['rgb'][i].permute(1, 2, 0).numpy()
+        rgb = rgb * np.array([0.229, 0.224, 0.225]) + np.array([0.485, 0.456, 0.406])
+        rgb = np.clip(rgb, 0, 1)
 
-    # Contact region (channel 5)
-    contact = sample['rgb_geometric'][i, 5].numpy()
-    axes[3, i].imshow(contact, cmap='hot', vmin=0, vmax=1)
-    axes[3, i].set_title(f'Contact (max={contact.max():.2f})')
-    axes[3, i].axis('off')
+        axes[0, i].imshow(rgb)
+        axes[0, i].set_title(f"{sample['difficulties'][i]}")
+        axes[0, i].axis('off')
 
-plt.tight_layout()
-plt.savefig(f'dataset_sample_debug_r{dataset.radius}_t{dataset.threshold}.png', dpi=150)
+        # Proximity to A (channel 3)
+        prox_A = sample['rgb_geometric'][i, 3].numpy()
+        axes[1, i].imshow(prox_A, cmap='Reds', vmin=0, vmax=1)
+        axes[1, i].set_title('Proximity to A')
+        axes[1, i].axis('off')
+
+        # Proximity to B (channel 4)
+        prox_B = sample['rgb_geometric'][i, 4].numpy()
+        axes[2, i].imshow(prox_B, cmap='Reds', vmin=0, vmax=1)
+        axes[2, i].set_title('Proximity to B')
+        axes[2, i].axis('off')
+
+        # Contact region (channel 5)
+        contact = sample['rgb_geometric'][i, 5].numpy()
+        axes[3, i].imshow(contact, cmap='hot', vmin=0, vmax=1)
+        axes[3, i].set_title(f'Contact (max={contact.max():.2f})')
+        axes[3, i].axis('off')
+
+    plt.tight_layout()
+    plt.savefig(f'{dataloader_vis_folder}/dataset_sample_debug_r{dataset.radius}_t{dataset.threshold}_b{batch_num}.png', dpi=150)

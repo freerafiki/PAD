@@ -361,12 +361,15 @@ class PrecomposedAlignmentDataset(Dataset):
                 })
 
         # Sort hard negatives by difficulty score (highest = hardest)
-        for pair_data in pairs.values():
-            if pair_data['hard_negative']:
-                pair_data['hard_negative'].sort(
-                    key=lambda x: x.get('difficulty_score', 0),
-                    reverse=True
-                )
+        # for pair_data in pairs.values():
+        #     if pair_data['hard_negative']:
+        #         pair_data['hard_negative'].sort(
+        #             key=lambda x: x.get('difficulty_score', 0),
+        #             reverse=True
+        #         )
+        
+        #     if len(pair_data['positive']) == 0:
+        #         breakpoint()
 
         # Filter: only keep pairs with at least 1 positive
         pairs = {k: v for k, v in pairs.items() if len(v['positive']) > 0}
@@ -378,6 +381,7 @@ class PrecomposedAlignmentDataset(Dataset):
         total_pos = sum(len(p['positive']) for p in self.pairs.values())
         total_neg = sum(len(p['negative']) for p in self.pairs.values())
         total_hard = sum(len(p['hard_negative']) for p in self.pairs.values())
+        # min_hard = np.min([len(p['hard_negative']) for p in self.pairs.values()])
 
         print(f"\nDataset Statistics:")
         print(f"  Unique piece pairs: {len(self.pairs)}")

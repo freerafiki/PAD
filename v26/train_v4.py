@@ -324,7 +324,7 @@ def main():
     print(f"Train: {len(train_dataset)} pairs")
     print(f"Val: {len(val_dataset)} pairs")
 
-    breakpoint()
+    # breakpoint()
 
     # Verify no overlap
     train_puzzles = set(k.split("|")[0] for k in train_dataset.pair_keys)
@@ -346,7 +346,7 @@ def main():
     )
 
     # model = GeometricScorer()
-    # breakpoint()
+    # # breakpoint()
     # model_v2, history_v2 = train_model(
     #     model_v2,
     #     train_dataset,
@@ -374,7 +374,7 @@ def main():
         lr=1e-4,
         weight_decay=1e-4,
         early_stopping_patience=3,
-        model_name="multimodal_boundary2",
+        model_name="multimodal_boundary_wikiart",
         # Combined loss weights (ranking-focused)
         bce_weight=0.15,  # Lower weight for BCE classification loss
         ranking_weight=0.55,  # Higher weight for Adaptive ranking loss

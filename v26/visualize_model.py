@@ -17,7 +17,7 @@ from sklearn.decomposition import PCA
 import cv2
 
 from dataset_v3 import PrecomposedAlignmentDataset, collate_alignment_samples, ShuffledBatchSampler
-from models import BaselineScorer, GeometricScorer, MultiModalScorerV2_Practical
+from models import BaselineScorer, GeometricScorer, MultiModalScorer #MultiModalScorerV2_Practical
 from torch.utils.data import DataLoader
 
 
@@ -32,7 +32,7 @@ def load_model(checkpoint_path, model_type, device='cuda'):
     elif model_type == 'geometric':
         model = GeometricScorer()
     elif model_type == 'multimodal':
-        model = MultiModalScorerV2_Practical()
+        model = MultiModalScorer() #MultiModalScorerV2_Practical()
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -380,7 +380,9 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
     
     # Get predictions
     with torch.no_grad():
-        if model_type == 'multimodal':
+        if model_type == 'baseline':
+            scores = torch.sigmoid(model(rgb)).squeeze()
+        elif model_type == 'multimodal':
             scores = torch.sigmoid(model(rgb, rgb_geometric)).squeeze()
         else:
             scores = torch.sigmoid(model(rgb_geometric)).squeeze()
@@ -395,10 +397,11 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
     dino_features = None
     if model_type == 'multimodal':
         dino_features = extract_dino_features(model, rgb)
+    
     dino_attention = None
     if model_type == 'multimodal':
         dino_attention = extract_dino_attention(model, rgb)
-    
+
     # *** Process each group using group_sizes ***
     start_idx = 0
     for group_idx, group_size in enumerate(group_sizes):
@@ -417,7 +420,7 @@ def visualize_batch(model, batch, device, save_dir, batch_idx=0, model_type='geo
         group_positions = [positions[i] for i in group_indices]
         group_vit_attn = [vit_attention[i] for i in group_indices]
         
-        group_dino_attention = None
+        group_dino_attn = None
         if dino_attention is not None:
             group_dino_attn = [dino_attention[i] for i in group_indices]
         # Extract DINO features for this group if available
