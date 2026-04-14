@@ -357,7 +357,7 @@ class PrecomposedAlignmentDataset(Dataset):
             dict: {pair_key: {'positive': [...], 'negative': [...], 'hard_negative': [...], 'non_neighbour': [...]}}
         """
         pairs = {}
-        non_neighbour_pairs = {}
+        # non_neighbour_pairs = {}
 
         # Process standard categories
         for category in ['positive', 'negative', 'hard_negative']:
@@ -463,7 +463,7 @@ class PrecomposedAlignmentDataset(Dataset):
         # Sort hard negatives by difficulty score (highest = hardest)
         self.neighbour_pairs = 0
         self.non_neighbour_pairs = 0
-        for pair_data in pairs.values():
+        for j, pair_data in pairs.values():
             if pair_data['hard_negative']:
                 pair_data['hard_negative'].sort(
                     key=lambda x: x.get('difficulty_score', 0),
@@ -472,6 +472,8 @@ class PrecomposedAlignmentDataset(Dataset):
             if len(pair_data['positive']) == 0:
                 pair_data['non_neighbours'] = True
                 self.non_neighbour_pairs += 1
+                self._non_neighbour_indices.add(j)
+
             else:
                 pair_data['non_neighbours'] = False
                 self.neighbour_pairs += 1
@@ -525,6 +527,7 @@ class PrecomposedAlignmentDataset(Dataset):
 
     def __getitem__(self, idx):
         """
+        Taken from _v3
         Return samples for one piece pair.
 
         Returns:
@@ -535,95 +538,56 @@ class PrecomposedAlignmentDataset(Dataset):
                 - difficulties: List[str] category names
                 - positions: List[int] original positions before shuffle
                 - pair_key: str identifier for this pair
-                - has_positive: True/False (False for non-neighbour batches)
-                - batch_type: 'standard'/'non_neighbour'
-        """
-        # Determine if this is a non-neighbour batch
-        is_non_neighbour_batch = False
-        standard_len = len(self.pair_keys)
-        
-        if self.include_non_neighbours and self.non_neighbour_keys:
-            # Check if idx is in the non-neighbour range
-            if idx >= standard_len:
-                is_non_neighbour_batch = True
-                # Map to non-neighbour index
-                non_neighbour_idx = idx - standard_len
-            else:
-                # Probabilistic approach: some standard batches become non-neighbour
-                if np.random.random() < self.non_neighbour_ratio:
-                    is_non_neighbour_batch = True
-                    non_neighbour_idx = np.random.randint(0, len(self.non_neighbour_keys))
-        
-        if is_non_neighbour_batch:
-            return self._get_non_neighbour_item(non_neighbour_idx)
-        else:
-            return self._get_standard_item(idx)
-
-    def _get_standard_item(self, idx):
-        """
-        Get a standard batch (with positive and negatives).
+        Group size varies based on available negatives.
         """
         pair_key = self.pair_keys[idx]
         pair_data = self.pairs[pair_key]
-
-        # Get positive sample (should be exactly 1, take first if multiple)
+        
+        # Get positive (exactly 1)
         if len(pair_data['positive']) == 0:
             raise ValueError(f"No positive for pair {pair_key}")
-
         pos_sample = pair_data['positive'][0]
-
-        # Sample negatives
-        n_hard_target = int(self.negatives_per_positive * self.hard_negative_ratio)
-        n_easy_target = self.negatives_per_positive - n_hard_target
-
+        
+        # Get ALL available negatives (or up to max)
+        available_hard = pair_data['hard_negative']
+        available_easy = pair_data['negative']
+        
         selected_negatives = []
-
-        # Sample hard negatives (prefer hardest ones)
-        if pair_data['hard_negative']:
-            n_hard = min(n_hard_target, len(pair_data['hard_negative']))
-            # Take top N hardest (already sorted by score descending)
-            selected_negatives.extend(pair_data['hard_negative'][:n_hard])
-
-        # Sample easy negatives (random)
-        if pair_data['negative']:
-            # If we couldn't get enough hard negatives, compensate with easy ones
-            n_easy_actual = self.negatives_per_positive - len(selected_negatives)
-            n_easy_actual = min(n_easy_actual, len(pair_data['negative']))
-
-            if n_easy_actual > 0:
-                # Sample without replacement if possible
-                replace = len(pair_data['negative']) < n_easy_actual
-
-                if replace:
-                    # Sample with replacement
-                    easy_indices = np.random.choice(
-                        len(pair_data['negative']),
-                        size=n_easy_actual,
-                        replace=True
-                    )
+        
+        if self.max_negatives_per_positive is None:
+            # Use ALL available negatives
+            selected_negatives.extend(available_hard)
+            selected_negatives.extend(available_easy)
+        else:
+            # Sample up to max, respecting ratio
+            n_hard_target = int(self.max_negatives_per_positive * self.hard_negative_ratio)
+            n_easy_target = self.max_negatives_per_positive - n_hard_target
+            
+            # Sample hard negatives
+            if available_hard:
+                n_hard = min(n_hard_target, len(available_hard))
+                selected_negatives.extend(available_hard[:n_hard])  # Take top N hardest
+            
+            # Sample easy negatives
+            if available_easy:
+                n_easy_actual = min(n_easy_target, len(available_easy))
+                if len(available_easy) <= n_easy_actual:
+                    selected_negatives.extend(available_easy)
                 else:
-                    # Sample without replacement
                     easy_indices = np.random.choice(
-                        len(pair_data['negative']),
+                        len(available_easy),
                         size=n_easy_actual,
                         replace=False
                     )
-
-                selected_negatives.extend([pair_data['negative'][i] for i in easy_indices])
-
-        # If still not enough negatives, warn and proceed with what we have
-        if len(selected_negatives) < self.negatives_per_positive:
-            # Could optionally duplicate some negatives here
-            # For now, just proceed with what we have
-            pass
-
+                    selected_negatives.extend([available_easy[i] for i in easy_indices])
+        
         # Combine and shuffle
         all_samples = [pos_sample] + selected_negatives
         shuffle_indices = np.random.permutation(len(all_samples))
         all_samples = [all_samples[i] for i in shuffle_indices]
         original_positions = shuffle_indices.tolist()
-
-        # Process samples
+        
+        # Process samples (same as before)
         batch = {
             'rgb': [],
             'rgb_geometric': [],
@@ -631,84 +595,221 @@ class PrecomposedAlignmentDataset(Dataset):
             'difficulties': [],
             'positions': []
         }
-
+        
         for sample, pos in zip(all_samples, original_positions):
             rgb, rgb_geom = self._process_sample(sample)
-
+            
             batch['rgb'].append(rgb)
             batch['rgb_geometric'].append(rgb_geom)
             batch['labels'].append(sample['label'])
             batch['difficulties'].append(sample['category'])
             batch['positions'].append(pos)
-
+        
         result = {
             'rgb': torch.stack(batch['rgb']),
             'rgb_geometric': torch.stack(batch['rgb_geometric']),
             'labels': torch.tensor(batch['labels'], dtype=torch.float32),
             'difficulties': batch['difficulties'],
             'positions': batch['positions'],
-            'pair_key': pair_key,
-            'has_positive': True,
-            'batch_type': 'standard'
-        }
-        
-        return result
-
-    def _get_non_neighbour_item(self, idx):
-        """
-        Get a non-neighbour batch (all samples are negatives, no positive).
-        
-        The model should learn to give low scores to ALL samples in this batch.
-        """
-        pair_key = self.non_neighbour_keys[idx]
-        pair_data = self.non_neighbour_pairs[pair_key]
-        
-        samples = pair_data['samples']
-        
-        # Sample if we have more than needed
-        if len(samples) > self.negatives_per_positive + 1:
-            indices = np.random.choice(len(samples), size=self.negatives_per_positive + 1, replace=False)
-            samples = [samples[i] for i in indices]
-        elif len(samples) < self.negatives_per_positive + 1:
-            # If we have fewer samples, sample with replacement
-            indices = np.random.choice(len(samples), size=self.negatives_per_positive + 1, replace=True)
-            samples = [samples[i] for i in indices]
-        
-        # Shuffle
-        shuffle_indices = np.random.permutation(len(samples))
-        samples = [samples[i] for i in shuffle_indices]
-        original_positions = shuffle_indices.tolist()
-        
-        # Process samples - ALL have label 0.0
-        batch = {
-            'rgb': [],
-            'rgb_geometric': [],
-            'labels': [],
-            'difficulties': [],
-            'positions': []
+            'pair_key': pair_key
         }
 
-        for sample, pos in zip(samples, original_positions):
-            rgb, rgb_geom = self._process_sample(sample)
+        return result 
 
-            batch['rgb'].append(rgb)
-            batch['rgb_geometric'].append(rgb_geom)
-            batch['labels'].append(0.0)  # All non-neighbour samples are negative
-            batch['difficulties'].append('non_neighbour')
-            batch['positions'].append(pos)
+    ############################################
+    ############################################
+    ############################################
+    # This was written to include the non-neighbour case
+    # in a different way, but not needed
+    # def __getitem__(self, idx):
+    #     """
+    #     Return samples for one piece pair.
 
-        result = {
-            'rgb': torch.stack(batch['rgb']),
-            'rgb_geometric': torch.stack(batch['rgb_geometric']),
-            'labels': torch.tensor(batch['labels'], dtype=torch.float32),
-            'difficulties': batch['difficulties'],
-            'positions': batch['positions'],
-            'pair_key': pair_key,
-            'has_positive': False,  # No positive in non-neighbour batches
-            'batch_type': 'non_neighbour'
-        }
+    #     Returns:
+    #         dict with:
+    #             - rgb: (N, 3, H, W) RGB images
+    #             - rgb_geometric: (N, 6, H, W) RGB + geometric features
+    #             - labels: (N,) 1.0 for positive, 0.0 for negative
+    #             - difficulties: List[str] category names
+    #             - positions: List[int] original positions before shuffle
+    #             - pair_key: str identifier for this pair
+    #             - has_positive: True/False (False for non-neighbour batches)
+    #             - batch_type: 'standard'/'non_neighbour'
+    #     """
+    #     # Determine if this is a non-neighbour batch
+    #     is_non_neighbour_batch = False
+    #     standard_len = len(self.pair_keys)
         
-        return result
+    #     if self.include_non_neighbours and self.non_neighbour_keys:
+    #         # Check if idx is in the non-neighbour range
+    #         if idx >= standard_len:
+    #             is_non_neighbour_batch = True
+    #             # Map to non-neighbour index
+    #             non_neighbour_idx = idx - standard_len
+    #         else:
+    #             # Probabilistic approach: some standard batches become non-neighbour
+    #             if np.random.random() < self.non_neighbour_ratio:
+    #                 is_non_neighbour_batch = True
+    #                 non_neighbour_idx = np.random.randint(0, len(self.non_neighbour_keys))
+        
+    #     if is_non_neighbour_batch:
+    #         return self._get_non_neighbour_item(non_neighbour_idx)
+    #     else:
+    #         return self._get_standard_item(idx)
+
+    # def _get_standard_item(self, idx):
+    #     """
+    #     Get a standard batch (with positive and negatives).
+    #     """
+    #     pair_key = self.pair_keys[idx]
+    #     pair_data = self.pairs[pair_key]
+
+    #     # Get positive sample (should be exactly 1, take first if multiple)
+    #     if len(pair_data['positive']) == 0:
+    #         raise ValueError(f"No positive for pair {pair_key}")
+
+    #     pos_sample = pair_data['positive'][0]
+
+    #     # Sample negatives
+    #     n_hard_target = int(self.negatives_per_positive * self.hard_negative_ratio)
+    #     n_easy_target = self.negatives_per_positive - n_hard_target
+
+    #     selected_negatives = []
+
+    #     # Sample hard negatives (prefer hardest ones)
+    #     if pair_data['hard_negative']:
+    #         n_hard = min(n_hard_target, len(pair_data['hard_negative']))
+    #         # Take top N hardest (already sorted by score descending)
+    #         selected_negatives.extend(pair_data['hard_negative'][:n_hard])
+
+    #     # Sample easy negatives (random)
+    #     if pair_data['negative']:
+    #         # If we couldn't get enough hard negatives, compensate with easy ones
+    #         n_easy_actual = self.negatives_per_positive - len(selected_negatives)
+    #         n_easy_actual = min(n_easy_actual, len(pair_data['negative']))
+
+    #         if n_easy_actual > 0:
+    #             # Sample without replacement if possible
+    #             replace = len(pair_data['negative']) < n_easy_actual
+
+    #             if replace:
+    #                 # Sample with replacement
+    #                 easy_indices = np.random.choice(
+    #                     len(pair_data['negative']),
+    #                     size=n_easy_actual,
+    #                     replace=True
+    #                 )
+    #             else:
+    #                 # Sample without replacement
+    #                 easy_indices = np.random.choice(
+    #                     len(pair_data['negative']),
+    #                     size=n_easy_actual,
+    #                     replace=False
+    #                 )
+
+    #             selected_negatives.extend([pair_data['negative'][i] for i in easy_indices])
+
+    #     # If still not enough negatives, warn and proceed with what we have
+    #     if len(selected_negatives) < self.negatives_per_positive:
+    #         # Could optionally duplicate some negatives here
+    #         # For now, just proceed with what we have
+    #         pass
+
+    #     # Combine and shuffle
+    #     all_samples = [pos_sample] + selected_negatives
+    #     shuffle_indices = np.random.permutation(len(all_samples))
+    #     all_samples = [all_samples[i] for i in shuffle_indices]
+    #     original_positions = shuffle_indices.tolist()
+
+    #     # Process samples
+    #     batch = {
+    #         'rgb': [],
+    #         'rgb_geometric': [],
+    #         'labels': [],
+    #         'difficulties': [],
+    #         'positions': []
+    #     }
+
+    #     for sample, pos in zip(all_samples, original_positions):
+    #         rgb, rgb_geom = self._process_sample(sample)
+
+    #         batch['rgb'].append(rgb)
+    #         batch['rgb_geometric'].append(rgb_geom)
+    #         batch['labels'].append(sample['label'])
+    #         batch['difficulties'].append(sample['category'])
+    #         batch['positions'].append(pos)
+
+    #     result = {
+    #         'rgb': torch.stack(batch['rgb']),
+    #         'rgb_geometric': torch.stack(batch['rgb_geometric']),
+    #         'labels': torch.tensor(batch['labels'], dtype=torch.float32),
+    #         'difficulties': batch['difficulties'],
+    #         'positions': batch['positions'],
+    #         'pair_key': pair_key,
+    #         'has_positive': True,
+    #         'batch_type': 'standard'
+    #     }
+        
+    #     return result
+
+    # def _get_non_neighbour_item(self, idx):
+    #     """
+    #     Get a non-neighbour batch (all samples are negatives, no positive).
+        
+    #     The model should learn to give low scores to ALL samples in this batch.
+    #     """
+    #     pair_key = self.non_neighbour_keys[idx]
+    #     pair_data = self.non_neighbour_pairs[pair_key]
+        
+    #     samples = pair_data['samples']
+        
+    #     # Sample if we have more than needed
+    #     if len(samples) > self.negatives_per_positive + 1:
+    #         indices = np.random.choice(len(samples), size=self.negatives_per_positive + 1, replace=False)
+    #         samples = [samples[i] for i in indices]
+    #     elif len(samples) < self.negatives_per_positive + 1:
+    #         # If we have fewer samples, sample with replacement
+    #         indices = np.random.choice(len(samples), size=self.negatives_per_positive + 1, replace=True)
+    #         samples = [samples[i] for i in indices]
+        
+    #     # Shuffle
+    #     shuffle_indices = np.random.permutation(len(samples))
+    #     samples = [samples[i] for i in shuffle_indices]
+    #     original_positions = shuffle_indices.tolist()
+        
+    #     # Process samples - ALL have label 0.0
+    #     batch = {
+    #         'rgb': [],
+    #         'rgb_geometric': [],
+    #         'labels': [],
+    #         'difficulties': [],
+    #         'positions': []
+    #     }
+
+    #     for sample, pos in zip(samples, original_positions):
+    #         rgb, rgb_geom = self._process_sample(sample)
+
+    #         batch['rgb'].append(rgb)
+    #         batch['rgb_geometric'].append(rgb_geom)
+    #         batch['labels'].append(0.0)  # All non-neighbour samples are negative
+    #         batch['difficulties'].append('non_neighbour')
+    #         batch['positions'].append(pos)
+
+    #     result = {
+    #         'rgb': torch.stack(batch['rgb']),
+    #         'rgb_geometric': torch.stack(batch['rgb_geometric']),
+    #         'labels': torch.tensor(batch['labels'], dtype=torch.float32),
+    #         'difficulties': batch['difficulties'],
+    #         'positions': batch['positions'],
+    #         'pair_key': pair_key,
+    #         'has_positive': False,  # No positive in non-neighbour batches
+    #         'batch_type': 'non_neighbour'
+    #     }
+        
+    #     return result
+    ############################################
+    ############################################
+    ############################################
 
     def _process_sample(self, sample):
         """
@@ -928,30 +1029,24 @@ class PrecomposedAlignmentDataset(Dataset):
             if key.split('|')[0] in keep_puzzles
         ]
         
-        # Filter non-neighbour keys (may have different puzzle patterns)
-        filtered_non_neighbour_keys = [
-            key for key in self.non_neighbour_keys
-            if key.split('|')[0] in keep_puzzles
-        ]
 
         # Create new instance (shallow copy)
         new_dataset = PrecomposedAlignmentDataset.__new__(PrecomposedAlignmentDataset)
         new_dataset.data_root = self.data_root
-        new_dataset.negatives_per_positive = self.negatives_per_positive
+        new_dataset.max_negatives_per_positive = self.max_negatives_per_positive
         new_dataset.hard_negative_ratio = self.hard_negative_ratio
         new_dataset.transform = self.transform
         new_dataset.pairs = self.pairs  # Share the pairs dict (read-only)
         new_dataset.pair_keys = filtered_keys
         new_dataset.non_neighbour_pairs = self.non_neighbour_pairs  # Share non-neighbour pairs
-        new_dataset.non_neighbour_keys = filtered_non_neighbour_keys
+        new_dataset.neighbour_pairs = self.neighbour_pairs  # Share non-neighbour pairs
         new_dataset.radius = radius
         new_dataset.threshold = threshold
-        new_dataset.include_non_neighbours = self.include_non_neighbours
-        new_dataset.non_neighbour_ratio = self.non_neighbour_ratio
+        new_dataset.non_neighbour_ratio = self.non_neighbour_pairs / len(self.pairs)
 
         print(f"Created {split_name} split: {len(filtered_keys)} pairs from {len(keep_puzzles)} puzzles")
-        if self.include_non_neighbours:
-            print(f"  Non-neighbour pairs: {len(filtered_non_neighbour_keys)}")
+        print(f"  Non-neighbour pairs: {self.non_neighbour_pairs}")
+        print(f"  Neighbour pairs: {self.neighbour_pairs}")
 
         return new_dataset
 
@@ -1012,8 +1107,9 @@ def collate_alignment_samples(batch_list):
     pair_keys = [item['pair_key'] for item in batch_list]
     
     # New fields for non-neighbour support
-    has_positive = [item['has_positive'] for item in batch_list]
-    batch_type = [item['batch_type'] for item in batch_list]
+    # has_positive = [item['has_positive'] for item in batch_list]
+    # batch_type = [item['batch_type'] for item in batch_list]
+    group_sizes = [len(item['labels']) for item in batch_list]
 
     result = {
         'rgb': rgb,
@@ -1022,8 +1118,9 @@ def collate_alignment_samples(batch_list):
         'difficulties': difficulties,
         'positions': positions,
         'pair_keys': pair_keys,
-        'has_positive': has_positive,
-        'batch_type': batch_type
+        # 'has_positive': has_positive,
+        # 'batch_type': batch_type,
+        'group_sizes': group_sizes
     }
 
     return result
