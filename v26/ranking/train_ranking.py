@@ -306,8 +306,8 @@ def main():
       # Adjusted for your data size
 
     # DATASET PARAMETERS
-    RADIUS = 50
-    THRESHOLD = 50
+    RADIUS = 25
+    THRESHOLD = 25
 
     # DINO PARAMETERS
     DINO_MODEL = "facebook/dinov2-base"

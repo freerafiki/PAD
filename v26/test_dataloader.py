@@ -1,5 +1,5 @@
 from torch.utils.data import DataLoader
-from dataset_v4 import PrecomposedAlignmentDataset, collate_alignment_samples, ShuffledBatchSampler
+from ranking.dataset_ranking import PrecomposedAlignmentDataset, collate_alignment_samples, ShuffledBatchSampler
 import matplotlib.pyplot as plt
 import numpy as np
 import os 
@@ -10,11 +10,11 @@ dataset = PrecomposedAlignmentDataset(
     data_root='/media/lucap/big_data/datasets/wikiart_PAD/PAD_dataset__Wikiart',
     # '/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4',
     max_negatives_per_positive=15,  # Will sample 3 hard + 3 easy
-    radius = 50,
-    threshold = 50
+    radius = 20,
+    threshold = 20
 )
 
-breakpoint()
+# breakpoint()
 
 # Create dataloader
 dataloader = DataLoader(
@@ -44,12 +44,12 @@ for batch in dataloader:
 #         negatives_per_positive=4
 #     )
 
-dataloader_vis_folder = 'dataloader_vis'
+dataloader_vis_folder = 'dataloader_ranking_vis'
 os.makedirs(dataloader_vis_folder, exist_ok=True)
 
 for batch_num in range(0, 100, 25):
     # Get one batch
-    sample = dataset[3]
+    sample = dataset[batch_num]
 
     n_samples = len(sample['rgb'])
     print(f"Batch contains {len(sample['rgb'])} samples")

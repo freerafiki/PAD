@@ -297,6 +297,7 @@ class PrecomposedAlignmentDataset(Dataset):
     def __init__(self,
                  data_root,
                  max_negatives_per_positive=4,
+                 hard_negative_ratio=0.5,
                  radius=20,
                  threshold=15,
                  transform=None):
@@ -313,6 +314,7 @@ class PrecomposedAlignmentDataset(Dataset):
         """
         self.data_root = Path(data_root)
         self.max_negatives_per_positive = max_negatives_per_positive
+        self.hard_negative_ratio = hard_negative_ratio
         self.radius = radius
         self.threshold = threshold
 
@@ -325,6 +327,8 @@ class PrecomposedAlignmentDataset(Dataset):
 
         # Group files by piece pairs
         print("Loading and grouping files by piece pairs...")
+        # Pre-compute which indices are non-neighbour
+        self._non_neighbour_indices = set() # must be before `_group_by_pairs()`!
         self.pairs = self._group_by_pairs()
         
         # Store non-neighbour pairs separately
@@ -337,8 +341,7 @@ class PrecomposedAlignmentDataset(Dataset):
         self.pair_keys = list(self.pairs.keys())
         # self.non_neighbour_keys = list(self.non_neighbour_pairs.keys())
         
-        # Pre-compute which indices are non-neighbour
-        self._non_neighbour_indices = set()
+
         # if self.include_non_neighbours and self.non_neighbour_keys:
         #     # Calculate how many non-neighbour batches to include
         #     total_standard = len(self.pair_keys)
@@ -463,7 +466,7 @@ class PrecomposedAlignmentDataset(Dataset):
         # Sort hard negatives by difficulty score (highest = hardest)
         self.neighbour_pairs = 0
         self.non_neighbour_pairs = 0
-        for j, pair_data in pairs.values():
+        for j, pair_data in enumerate(pairs.values()):
             if pair_data['hard_negative']:
                 pair_data['hard_negative'].sort(
                     key=lambda x: x.get('difficulty_score', 0),
@@ -544,9 +547,15 @@ class PrecomposedAlignmentDataset(Dataset):
         pair_data = self.pairs[pair_key]
         
         # Get positive (exactly 1)
-        if len(pair_data['positive']) == 0:
-            raise ValueError(f"No positive for pair {pair_key}")
-        pos_sample = pair_data['positive'][0]
+        positive_pair = False
+        if len(pair_data['positive']) > 0:
+            # breakpoint()
+            # raise ValueError(f"No positive for pair {pair_key}")
+            pos_sample = pair_data['positive'][0]
+            positive_pair = True
+        else:
+            pos_sample = []
+            positive_pair = False
         
         # Get ALL available negatives (or up to max)
         available_hard = pair_data['hard_negative']
@@ -563,6 +572,9 @@ class PrecomposedAlignmentDataset(Dataset):
             n_hard_target = int(self.max_negatives_per_positive * self.hard_negative_ratio)
             n_easy_target = self.max_negatives_per_positive - n_hard_target
             
+            if positive_pair == False:
+                n_easy_target += 1
+
             # Sample hard negatives
             if available_hard:
                 n_hard = min(n_hard_target, len(available_hard))
@@ -582,7 +594,11 @@ class PrecomposedAlignmentDataset(Dataset):
                     selected_negatives.extend([available_easy[i] for i in easy_indices])
         
         # Combine and shuffle
-        all_samples = [pos_sample] + selected_negatives
+        if positive_pair == True:
+            all_samples = [pos_sample] + selected_negatives
+        else:
+            all_samples = selected_negatives
+
         shuffle_indices = np.random.permutation(len(all_samples))
         all_samples = [all_samples[i] for i in shuffle_indices]
         original_positions = shuffle_indices.tolist()
