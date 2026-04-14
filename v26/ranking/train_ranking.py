@@ -1,22 +1,19 @@
 from pathlib import Path
-
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 # Import your dataset and models
-from dataset_v3 import (
+from dataset_v4 import (
     PrecomposedAlignmentDataset,
     ShuffledBatchSampler,
     collate_alignment_samples,
 )
-from models import MultiModalScorerV2_Practical, GeometricScorer
-from loss_v2 import AdaptiveTopNRankingLoss, PerceptualBoundaryLoss
-from training_utils import plot_training_history, debug_group_structure
-from torch.utils.data import DataLoader, random_split
-from tqdm import tqdm
-from training_utils import plot_training_history, evaluate_ranking, estimate_data_needs, diagnose_data_sufficiency
+from models_ranking import MultiModalScorerV2_Practical, GeometricScorer
+from loss_ranking import AdaptiveTopNRankingLoss, PerceptualBoundaryLoss
+from training_utils import evaluate_ranking, estimate_data_needs, diagnose_data_sufficiency, plot_training_history
 
 
 def train_model(
@@ -51,6 +48,7 @@ def train_model(
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
+        shuffle=False,
         sampler=ShuffledBatchSampler(train_dataset, shuffle=True, seed=42),
         collate_fn=collate_alignment_samples,
         num_workers=4,
@@ -64,7 +62,8 @@ def train_model(
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        sampler=ShuffledBatchSampler(val_dataset, shuffle=False),
+        shuffle=False,
+        sampler=ShuffledBatchSampler(val_dataset, shuffle=False, seed=42),
         collate_fn=collate_alignment_samples,
         num_workers=4,
         pin_memory=True,
@@ -145,11 +144,15 @@ def train_model(
             optimizer.zero_grad()
 
             # Forward
-            if model_name == 'geometric':
-                logits = model(rgb_geometric)
+            if hasattr(model, 'dino'):  # MultiModalScorer
+                logits = model(rgb, rgb_geometric).squeeze()
+            elif hasattr(model, 'projection'):
+                logits = model(rgb_geometric).squeeze()
             else:
-                logits = model(rgb, rgb_geometric)
-            scores = torch.sigmoid(logits).squeeze()  # Convert to [0, 1] for ranking loss
+                logits = model(rgb).squeeze()
+
+            # Convert to [0, 1] for ranking loss
+            scores = torch.sigmoid(logits).squeeze()  
 
             # Loss 1: BCE Loss
             bce_loss = bce_criterion(logits, labels)
@@ -205,10 +208,14 @@ def train_model(
                 difficulties = batch["difficulties"]
                 group_sizes = batch['group_sizes']
 
-                if model_name == 'geometric':
-                    logits = model(rgb_geometric)
+                # Forward
+                if hasattr(model, 'dino'):  # MultiModalScorer
+                    logits = model(rgb, rgb_geometric).squeeze()
+                elif hasattr(model, 'projection'):
+                    logits = model(rgb_geometric).squeeze()
                 else:
-                    logits = model(rgb, rgb_geometric)
+                    logits = model(rgb).squeeze()
+
                 scores = torch.sigmoid(logits).squeeze()
 
                 bce_loss = bce_criterion(logits, labels)
@@ -304,6 +311,7 @@ def main():
 
     # DINO PARAMETERS
     DINO_MODEL = "facebook/dinov2-base"
+    VIT_MODEL ="google/vit-base-patch16-224",
 
     print(f"Using device: {DEVICE}")
 
@@ -341,7 +349,9 @@ def main():
     print("=" * 60)
 
     model = MultiModalScorerV2_Practical(
-        freeze_vit_layers=10,  # Only train last 2 layers
+        dino_model=DINO_MODEL,
+        geometric_vit=VIT_MODEL,
+        freeze_vit_layers=0,  # Only train last 2 layers
         dropout=0.5
     )
 
@@ -371,7 +381,7 @@ def main():
         optimizer=optimizer,
         num_epochs=NUM_EPOCHS,
         batch_size=BATCH_SIZE,
-        lr=1e-4,
+        lr=LEARNING_RATE,
         weight_decay=1e-4,
         early_stopping_patience=3,
         model_name="multimodal_boundary_wikiart",
