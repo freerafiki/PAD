@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 # Import your dataset and models
-from dataset_v4 import (
+from dataset_ranking import (
     PrecomposedAlignmentDataset,
     ShuffledBatchSampler,
     collate_alignment_samples,
@@ -104,6 +104,7 @@ def train_model(
         "train_loss": [],
         "train_bce_loss": [],
         "train_ranking_loss": [],
+        "train_boundary_loss": [],
         "val_loss": [],
         "val_bce_loss": [],
         "val_ranking_loss": [],
@@ -130,6 +131,7 @@ def train_model(
         train_loss = 0.0
         train_bce_loss = 0.0
         train_ranking_loss = 0.0
+        train_boundary_loss = 0.0
         num_batches = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{num_epochs}")
@@ -137,7 +139,7 @@ def train_model(
         for batch in pbar:
             rgb = batch["rgb"].to(device)
             rgb_geometric = batch["rgb_geometric"].to(device)
-            labels = batch["labels"].to(device).unsqueeze(1)  # (B, 1)
+            labels = batch["labels"].to(device) #.unsqueeze(1)  # (B, 1)
             difficulties = batch["difficulties"]
             group_sizes = batch['group_sizes']
 
@@ -155,7 +157,7 @@ def train_model(
             scores = torch.sigmoid(logits).squeeze()  
 
             # Loss 1: BCE Loss
-            bce_loss = bce_criterion(logits, labels)
+            bce_loss = bce_criterion(logits, labels.squeeze())
 
             # Loss 2: Ranking Loss
             ranking_loss = ranking_criterion(scores, labels.squeeze(), difficulties, group_sizes=group_sizes)
@@ -178,6 +180,7 @@ def train_model(
             train_loss += loss.item()
             train_bce_loss += bce_loss.item()
             train_ranking_loss += ranking_loss.item()
+            train_boundary_loss += boundary_loss.item()
             num_batches += 1
 
             pbar.set_postfix(
@@ -192,19 +195,21 @@ def train_model(
         avg_train_loss = train_loss / num_batches
         avg_train_bce = train_bce_loss / num_batches
         avg_train_ranking = train_ranking_loss / num_batches
+        avg_train_boundary = train_boundary_loss / num_batches
 
         # Validation
         model.eval()
         val_loss = 0.0
         val_bce_loss = 0.0
         val_ranking_loss = 0.0
+        val_boundary_loss = 0.0
         num_batches = 0
 
         with torch.no_grad():
             for batch in val_loader:
                 rgb = batch["rgb"].to(device)
                 rgb_geometric = batch["rgb_geometric"].to(device)
-                labels = batch["labels"].to(device).unsqueeze(1)
+                labels = batch["labels"].to(device) #.unsqueeze(1) # no need for unsqueeze, as we would squeeze them later :)
                 difficulties = batch["difficulties"]
                 group_sizes = batch['group_sizes']
 
@@ -218,18 +223,21 @@ def train_model(
 
                 scores = torch.sigmoid(logits).squeeze()
 
-                bce_loss = bce_criterion(logits, labels)
+                bce_loss = bce_criterion(logits, labels.squeeze())
                 ranking_loss = ranking_criterion(scores, labels.squeeze(), difficulties, group_sizes=group_sizes)
-                loss = bce_weight * bce_loss + ranking_weight * ranking_loss
+                boundary_loss = boundary_criterion(rgb, rgb_geometric, labels)                
+                loss = bce_weight * bce_loss + ranking_weight * ranking_loss + boundary_weight * boundary_loss
 
                 val_loss += loss.item()
                 val_bce_loss += bce_loss.item()
                 val_ranking_loss += ranking_loss.item()
+                val_boundary_loss += boundary_loss.item()
                 num_batches += 1
 
         avg_val_loss = val_loss / num_batches
         avg_val_bce = val_bce_loss / num_batches
         avg_val_ranking = val_ranking_loss / num_batches
+        avg_val_boundary = val_boundary_loss / num_batches
         
         # Ranking accuracy (Top-1, Top-3, Top-5)
         model_type = "geometric" if "geometric" == model_name else "multimodal"
@@ -239,9 +247,11 @@ def train_model(
         history["train_loss"].append(avg_train_loss)
         history["train_bce_loss"].append(avg_train_bce)
         history["train_ranking_loss"].append(avg_train_ranking)
+        history["train_boundary_loss"].append(avg_train_boundary)
         history["val_loss"].append(avg_val_loss)
         history["val_bce_loss"].append(avg_val_bce)
         history["val_ranking_loss"].append(avg_val_ranking)
+        history["val_boundary_loss"].append(avg_val_boundary)
         history["val_accuracy"].append(val_acc)
         history["val_top3_accuracy"].append(val_top3_acc)
         history["val_top5_accuracy"].append(val_top5_acc)
@@ -252,7 +262,7 @@ def train_model(
 
         print(
             f"Epoch {epoch:3d}/{num_epochs} | "
-            f"Train Loss: {avg_train_loss:.4f} (BCE: {avg_train_bce:.4f}, Rank: {avg_train_ranking:.4f}) | "
+            f"Train Loss: {avg_train_loss:.4f} (BCE: {avg_train_bce:.4f}, Rank: {avg_train_ranking:.4f}, Boundary: {avg_train_boundary:.4f}) | "
             f"Val Loss: {avg_val_loss:.4f} | "
             f"Val Acc: {val_acc:.3f} (Top3: {val_top3_acc:.3f}, Top5: {val_top5_acc:.3f}) | "
             f"Pos/Neg/Hard: {avg_pos:.3f}/{avg_neg:.3f}/{avg_hard_neg:.3f} | "
@@ -273,6 +283,7 @@ def train_model(
                 "history": history,
             }
             torch.save(checkpoint, save_dir / f"{model_name}_best.pth")
+            torch.save(checkpoint, save_dir / f"{model_name}_best_at_epoch_{epoch}.pth")
             print(f"  → Saved best model (acc: {val_acc:.3f})")
         else:
             patience_counter += 1
@@ -298,20 +309,26 @@ def main():
     # Configuration
     DATA_ROOT = "/media/lucap/big_data/datasets/wikiart_PAD/PAD_dataset__Wikiart"
     # "/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4"
-    BATCH_SIZE = 4
-    NUM_EPOCHS = 10
+    BATCH_SIZE = 8
+    NUM_EPOCHS = 25
+    EARLY_STOPPING_PATIENCE = 5 # NUM_EPOCHS // 4
     LEARNING_RATE = 1e-4
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     MAX_NEGATIVES_PER_POSITIVE = 12 # use all available
       # Adjusted for your data size
 
+
     # DATASET PARAMETERS
     RADIUS = 25
     THRESHOLD = 25
 
+
+    # model parameters
+    FROZEN_LAYERS = 0
+    DROPOUT = 0.5
     # DINO PARAMETERS
     DINO_MODEL = "facebook/dinov2-base"
-    VIT_MODEL ="google/vit-base-patch16-224",
+    VIT_MODEL = "google/vit-base-patch16-224"
 
     print(f"Using device: {DEVICE}")
 
@@ -351,8 +368,8 @@ def main():
     model = MultiModalScorerV2_Practical(
         dino_model=DINO_MODEL,
         geometric_vit=VIT_MODEL,
-        freeze_vit_layers=0,  # Only train last 2 layers
-        dropout=0.5
+        freeze_vit_layers=FROZEN_LAYERS,  # Only train last 2 layers
+        dropout=DROPOUT
     )
 
     # model = GeometricScorer()
@@ -383,8 +400,8 @@ def main():
         batch_size=BATCH_SIZE,
         lr=LEARNING_RATE,
         weight_decay=1e-4,
-        early_stopping_patience=3,
-        model_name="multimodal_boundary_wikiart",
+        early_stopping_patience=EARLY_STOPPING_PATIENCE,
+        model_name="multimodal_BRB_wikiart",
         # Combined loss weights (ranking-focused)
         bce_weight=0.15,  # Lower weight for BCE classification loss
         ranking_weight=0.55,  # Higher weight for Adaptive ranking loss

@@ -4,7 +4,7 @@ import torch
 
 def plot_training_history(history, save_path):
     """Plot training curves."""
-    fig, axes = plt.subplots(3, 3, figsize=(18, 14))
+    fig, axes = plt.subplots(3, 4, figsize=(24, 14))
 
     epochs = range(1, len(history["train_loss"]) + 1)
 
@@ -13,7 +13,7 @@ def plot_training_history(history, save_path):
     axes[0, 0].plot(epochs, history["val_loss"], label="Val Loss")
     axes[0, 0].set_xlabel("Epoch")
     axes[0, 0].set_ylabel("Loss")
-    axes[0, 0].set_title("Total Loss (BCE + Ranking)")
+    axes[0, 0].set_title("Total Loss (BCE + Ranking + Boundary)")
     axes[0, 0].legend()
     axes[0, 0].grid(True)
 
@@ -34,6 +34,15 @@ def plot_training_history(history, save_path):
     axes[0, 2].set_title("Ranking Loss")
     axes[0, 2].legend()
     axes[0, 2].grid(True)
+
+    # Boundary Loss
+    axes[0, 3].plot(epochs, history["train_boundary_loss"], label="Train Boundary", color="green")
+    axes[0, 3].plot(epochs, history["val_boundary_loss"], label="Val Boundary", color="red")
+    axes[0, 3].set_xlabel("Epoch")
+    axes[0, 3].set_ylabel("Loss")
+    axes[0, 3].set_title("Boundary Loss")
+    axes[0, 3].legend()
+    axes[0, 3].grid(True)
 
     # Top-1, Top-3, Top-5 Accuracy
     axes[1, 0].plot(epochs, history["val_accuracy"], label="Top-1", color="green", linewidth=2)

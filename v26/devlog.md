@@ -1,5 +1,76 @@
 # WIKIART 
 
+### Experiment with `train_ranking.py` (14/04/2026)
+
+###### Dataset
+```
+Dataset Statistics:
+  Unique piece pairs: 415241
+    Neighbour pairs: 27906
+    Non Neighbour pairs: 387335
+    Neigh / Non-Neigh split: 6.72% / 93.28%
+    Non-Neighbour percentage: 93.28%
+  Total positive samples: 27906
+  Total negative samples: 139459
+  Total hard negative samples: 829573
+    Avg negatives per pair: 2.33
+  Warning: 387345 pairs have fewer than 5 negatives
+    (will use sampling with replacement for these)
+
+=== Puzzle-Based Split ===
+Total puzzles: 1648
+Train puzzles: 1318
+Val puzzles: 330
+Created train split: 335220 pairs from 1318 puzzles
+  Non-neighbour pairs: 387335
+  Neighbour pairs: 27906
+Created val split: 80021 pairs from 330 puzzles
+  Non-neighbour pairs: 387335
+  Neighbour pairs: 27906
+
+=== Dataset Ready ===
+Train: 335220 pairs
+Val: 80021 pairs
+✓ No puzzle overlap between train and val
+```
+##### Model
+```
+============================================================
+TRAINING MODEL 5: RGB + Geometry + DINO (with more frozen layers)
+============================================================
+Some weights of ViTModel were not initialized from the model checkpoint at google/vit-base-patch16-224 and are newly initialized: ['pooler.dense.bias', 'pooler.dense.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+ViT: 86,389,248 trainable / 86,389,248 total (100.0%)
+
+=== Data Needs Estimate ===
+Total parameters: 174,434,116
+  ├── Trainable: 87,853,636
+  │   ├── Fine-tuned (pre-trained backbones): 86,465,280
+  │   └── New layers (from scratch): 1,388,356
+  └── Frozen: 86,580,480
+
+Data requirements:
+  Minimum (conservative):
+    ├── Fine-tuned params: 86,465,280 × 1 = 86,465,280 samples
+    └── New layers: 1,388,356 × 10 = 13,883,560 samples
+    └── Total minimum: 100,348,840 samples
+  Recommended:
+    ├── Fine-tuned params: 86,465,280 × 5 = 432,326,400 samples
+    └── New layers: 1,388,356 × 20 = 27,767,120 samples
+    └── Total recommended: 460,093,520 samples
+
+Current training data: 335,220 samples
+❌ INSUFFICIENT data (need at least 100,013,620 more samples)
+   Consider: more data, stronger regularization, or freezing more layers
+Training multimodal_boundary_wikiart for up to 25 epochs
+Early stopping patience: 5
+Loss: BCE*0.15 + AdaptiveTopNRankingLoss*0.55 + PerceptualBoundaryLoss*0.3
+  AdaptiveTopNRankingLoss: top_n=3, margin=0.3, temperature=1.0
+Train samples: 335220 pairs
+Val samples: 80021 pairs
+```
+
+
 ### Experiment with `train_v3.py` (27/03/2026)
 
 #### Dataset
@@ -126,5 +197,3 @@ FINAL COMPARISON
 Baseline (RGB only):      0.987
 + Geometry:               0.955
 ```
-
-
