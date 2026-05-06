@@ -359,6 +359,8 @@ class PrecomposedAlignmentDataset(Dataset):
         Returns:
             dict: {pair_key: {'positive': [...], 'negative': [...], 'hard_negative': [...], 'non_neighbour': [...]}}
         """
+        # from itertools import islice
+
         pairs = {}
         # non_neighbour_pairs = {}
 
@@ -371,6 +373,7 @@ class PrecomposedAlignmentDataset(Dataset):
                 print(f"Warning: {images_dir} does not exist")
                 continue
             
+            # for img_path in islice(images_dir.glob('*.png'), 10000):
             for img_path in images_dir.glob('*.png'):
                 # Classify file
                 file_type = classify_file(img_path.name)

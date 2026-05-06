@@ -36,7 +36,8 @@ def train_model(
     hard_negative_weight=2.0,  # Weight for hard negatives in ranking loss
     top_n=3,  # Target top-N positions for AdaptiveTopNRankingLoss
     temperature=1.0,  # Temperature for smooth position penalty
-    max_norm=1.0 # Gradient clipping (helps with small data)
+    max_norm=1.0, # Gradient clipping (helps with small data)
+    pos_weight_val_BCE = 4.0 
 ):
     """
     Training with combined BCE + AdaptiveTopNRankingLoss and early stopping for small datasets.
@@ -70,7 +71,8 @@ def train_model(
     )
 
     # Loss functions
-    bce_criterion = nn.BCEWithLogitsLoss()  # More stable than BCE + Sigmoid
+
+    bce_criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight_val_BCE]).to(device))  # More stable than BCE + Sigmoid
     ranking_criterion = AdaptiveTopNRankingLoss(
         top_n=top_n,
         margin=ranking_margin,
@@ -108,6 +110,7 @@ def train_model(
         "val_loss": [],
         "val_bce_loss": [],
         "val_ranking_loss": [],
+        "val_boundary_loss": [],
         "val_accuracy": [],
         "val_top3_accuracy": [],
         "val_top5_accuracy": [],
@@ -188,6 +191,7 @@ def train_model(
                     "loss": f"{loss.item():.4f}",
                     "bce": f"{bce_loss.item():.4f}",
                     "rank": f"{ranking_loss.item():.4f}",
+                    "boundary": f"{boundary_loss.item():.4f}",
                     "lr": f"{scheduler.get_last_lr()[0]:.6f}",
                 }
             )
@@ -310,8 +314,8 @@ def main():
     DATA_ROOT = "/media/lucap/big_data/datasets/wikiart_PAD/PAD_dataset__Wikiart"
     # "/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4"
     BATCH_SIZE = 8
-    NUM_EPOCHS = 25
-    EARLY_STOPPING_PATIENCE = 5 # NUM_EPOCHS // 4
+    NUM_EPOCHS = 20
+    EARLY_STOPPING_PATIENCE = 4 # NUM_EPOCHS // 4
     LEARNING_RATE = 1e-4
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     MAX_NEGATIVES_PER_POSITIVE = 12 # use all available
@@ -324,7 +328,7 @@ def main():
 
 
     # model parameters
-    FROZEN_LAYERS = 0
+    FROZEN_LAYERS = 8
     DROPOUT = 0.5
     # DINO PARAMETERS
     DINO_MODEL = "facebook/dinov2-base"
@@ -401,7 +405,7 @@ def main():
         lr=LEARNING_RATE,
         weight_decay=1e-4,
         early_stopping_patience=EARLY_STOPPING_PATIENCE,
-        model_name="multimodal_BRB_wikiart",
+        model_name="multimodal_bceW_wikiart_frozen8",
         # Combined loss weights (ranking-focused)
         bce_weight=0.15,  # Lower weight for BCE classification loss
         ranking_weight=0.55,  # Higher weight for Adaptive ranking loss

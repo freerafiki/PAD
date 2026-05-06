@@ -197,6 +197,7 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
     correct_top3 = 0
     correct_top5 = 0
     total_groups = 0
+    total_groups_with_positive =0
     all_pos_scores = []
     all_neg_scores = []
     all_hard_neg_scores = []
@@ -219,6 +220,7 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
             # breakpoint()
             scores_np = scores.cpu().numpy()
             labels_np = labels.cpu().numpy()
+            labels_pt = labels.cpu()
 
             # Find groups
             start_idx = 0
@@ -226,47 +228,44 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
                 end_idx = start_idx + group_size
 
                 group_scores = scores_np[start_idx:end_idx]
-                group_labels = labels_np[start_idx:end_idx]
+                group_labels = labels_pt[start_idx:end_idx]
+                group_labels_np = labels_np[start_idx:end_idx]
                 group_difficulties = difficulties[start_idx:end_idx]
 
-                # Find positive (should be exactly one)
+                # Validate: should have exactly 1 positive
                 pos_mask = group_labels == 1.0
                 if pos_mask.sum() != 1:
-                    print(f"⚠️  Warning: Group has {pos_mask.sum()} positives (expected 1)")
-                    start_idx = end_idx
-                    continue
+                    # we are in the "non neighbours" group
+                    if pos_mask.sum() > 1: 
+                        print(f"⚠️  Warning: we actaully have more than one positive: {pos_mask.sum().item()} positives in this group!")
+                    # print(f"⚠️  Warning: Group {group_idx} has {pos_mask.sum().item()} positives")
+                
+                else:
+                    # we are in the "neighbours" group
+                    # Get positive and negative scores
+                    pos_idx_in_group = torch.where(pos_mask)[0][0]
+                    neg_mask = ~pos_mask
+                    # pos_score = group_scores[pos_idx_in_group]
+                    # neg_scores = group_scores[neg_mask]
+                    
+                    # Top-1: positive is ranked first
+                    if pos_idx_in_group == 0:
+                        correct_top1 += 1
+                    
+                    # Top-3: positive is in top 3
+                    if pos_idx_in_group < 3:
+                        correct_top3 += 1
+                    
+                    # Top-5: positive is in top 5
+                    if pos_idx_in_group < 5:
+                        correct_top5 += 1
 
-                pos_idx_in_group = np.where(pos_mask)[0][0]
-                pos_score = group_scores[pos_idx_in_group]
-                
-                # # Check if positive has highest score
-                # if pos_score == group_scores.max():
-                #     correct += 1
-                
+                    total_groups_with_positive += 1
+
                 total_groups += 1
-                
-                # Collect statistics
-                all_pos_scores.append(pos_score)
-                all_neg_scores.extend(group_scores[~pos_mask])
-                
                 start_idx = end_idx
-                
-                # Top-1: positive is ranked first
-                if pos_idx_in_group == 0:
-                    correct_top1 += 1
-                
-                # Top-3: positive is in top 3
-                if pos_idx_in_group < 3:
-                    correct_top3 += 1
-                
-                # Top-5: positive is in top 5
-                if pos_idx_in_group < 5:
-                    correct_top5 += 1
-
-                total_groups += 1
-
                 # Collect scores by type
-                for score, label, diff in zip(group_scores, group_labels, group_difficulties):
+                for score, label, diff in zip(group_scores, group_labels_np, group_difficulties):
                     if label == 1.0:
                         all_pos_scores.append(score)
                     elif diff == 'hard_negative':
@@ -274,9 +273,9 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
                     else:
                         all_neg_scores.append(score)
 
-    accuracy_top1 = correct_top1 / total_groups if total_groups > 0 else 0.0
-    accuracy_top3 = correct_top3 / total_groups if total_groups > 0 else 0.0
-    accuracy_top5 = correct_top5 / total_groups if total_groups > 0 else 0.0
+    accuracy_top1 = correct_top1 / total_groups if total_groups_with_positive > 0 else 0.0
+    accuracy_top3 = correct_top3 / total_groups if total_groups_with_positive > 0 else 0.0
+    accuracy_top5 = correct_top5 / total_groups if total_groups_with_positive > 0 else 0.0
     avg_pos_score = np.mean(all_pos_scores) if all_pos_scores else 0.0
     avg_neg_score = np.mean(all_neg_scores) if all_neg_scores else 0.0
     avg_hard_neg_score = np.mean(all_hard_neg_scores) if all_hard_neg_scores else 0.0

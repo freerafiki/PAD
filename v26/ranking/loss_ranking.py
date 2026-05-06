@@ -10,7 +10,7 @@ class BoundaryConsistencyLoss(nn.Module):
     Measures feature similarity in the contact region between two pieces.
     """
     
-    def __init__(self, feature_extractor='dino', consistency_weight=1.0):
+    def __init__(self, feature_extractor='dino', consistency_weight=1.0, negative_margin=0.3, negative_weight=0.1):
         """
         Args:
             feature_extractor: 'dino' or 'vit' - which features to use
@@ -19,6 +19,8 @@ class BoundaryConsistencyLoss(nn.Module):
         super().__init__()
         self.feature_extractor = feature_extractor
         self.consistency_weight = consistency_weight
+        self.negative_margin = negative_margin
+        self.negative_weight = negative_weight
     
     def extract_boundary_features(self, model, rgb, rgb_geometric, contact_mask):
         """
@@ -144,8 +146,8 @@ class BoundaryConsistencyLoss(nn.Module):
             # Negative: want low similarity (close to 0)
             # Use hinge loss: only penalize if similarity is too high
             neg_similarity = similarity[neg_mask]
-            neg_loss = torch.clamp(neg_similarity - 0.3, min=0).mean()  # Margin at 0.3
-            loss += neg_loss * 0.5  # Weight negatives less
+            neg_loss = torch.clamp(neg_similarity - self.negative_margin, min=0).mean()  # Margin at 0.3
+            loss += neg_loss * self.negative_weight  # Weight negatives less
         
         return loss * self.consistency_weight
 
