@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import Dinov2Model, ViTModel
 
 """
@@ -42,22 +43,19 @@ class BaselineScorer(nn.Module):
 class GeometricScorer(nn.Module):
     """RGB + 3 geometric channels."""
 
-    def __init__(self, pretrained_name="google/vit-base-patch16-224"):
+    def __init__(self, pretrained_name="google/vit-base-patch16-224", geometric_channel_scale=1.0):
         super().__init__()
+        self.geometric_channel_scale = geometric_channel_scale
 
-        # Project 6 channels to 3
         self.projection = nn.Conv2d(6, 3, kernel_size=1)
 
-        # ViT backbone
         self.vit = ViTModel.from_pretrained(pretrained_name)
 
-        # Scoring head
         self.scorer = nn.Sequential(
             nn.Linear(768, 256),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(256, 1),
-            # nn.Sigmoid(),
         )
 
     def forward(self, rgb_geometric):
@@ -65,12 +63,16 @@ class GeometricScorer(nn.Module):
         Args:
             rgb_geometric: (B, 6, H, W)
                            channels 0-2: RGB
-                           channels 3-5: geometric features
+                           channels 3-5: geometric features (scaled by geometric_channel_scale)
         Returns:
             scores: (B, 1)
         """
-        x = self.projection(rgb_geometric)  # (B, 3, H, W)
-        vit_feats = self.vit(x).pooler_output  # (B, 768)
+        x = torch.cat([
+            rgb_geometric[:, :3],
+            rgb_geometric[:, 3:] * self.geometric_channel_scale,
+        ], dim=1)
+        x = self.projection(x)
+        vit_feats = self.vit(x).pooler_output
         scores = self.scorer(vit_feats)
         return scores
 
@@ -82,23 +84,22 @@ class MultiModalScorer(nn.Module):
         self,
         geometric_vit="google/vit-base-patch16-224",
         dino_model="facebook/dinov2-base",
+        geometric_channel_scale=1.0,
     ):
         super().__init__()
+        self.geometric_channel_scale = geometric_channel_scale
 
-        # Branch 1: Geometric ViT
         self.projection = nn.Conv2d(6, 3, kernel_size=1)
         self.geometric_vit = ViTModel.from_pretrained(geometric_vit)
 
-        # Branch 2: DINO (frozen)
         self.dino = Dinov2Model.from_pretrained(dino_model)
         for param in self.dino.parameters():
             param.requires_grad = False
         self.dino.eval()
         print(f"DINO model loaded. Output dimension: {self.dino.config.hidden_size}")
 
-        # Fusion head
-        dino_dim = self.dino.config.hidden_size  # 768 for dinov2-base
-        geom_dim = self.geometric_vit.config.hidden_size  # 768 for vit-base
+        dino_dim = self.dino.config.hidden_size
+        geom_dim = self.geometric_vit.config.hidden_size
 
         self.fusion = nn.Sequential(
             nn.Linear(geom_dim + dino_dim, 512),
@@ -108,27 +109,20 @@ class MultiModalScorer(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(128, 1),
-            # nn.Sigmoid(),
         )
 
     def forward(self, rgb, rgb_geometric):
-        """
-        Args:
-            rgb: (B, 3, H, W) - for DINO
-            rgb_geometric: (B, 6, H, W) - for geometric branch
-        Returns:
-            scores: (B, 1)
-        """
-        # Geometric branch
-        x = self.projection(rgb_geometric)
-        geom_feats = self.geometric_vit(x).pooler_output  # (B, 768)
+        rgb_geom = torch.cat([
+            rgb_geometric[:, :3],
+            rgb_geometric[:, 3:] * self.geometric_channel_scale,
+        ], dim=1)
+        x = self.projection(rgb_geom)
+        geom_feats = self.geometric_vit(x).pooler_output
 
-        # DINO branch (no gradients)
         with torch.no_grad():
-            dino_feats = self.dino(rgb).pooler_output  # (B, 768)
+            dino_feats = self.dino(rgb).pooler_output
 
-        # Fuse
-        combined = torch.cat([geom_feats, dino_feats], dim=1)  # (B, 1536)
+        combined = torch.cat([geom_feats, dino_feats], dim=1)
         scores = self.fusion(combined)
 
         return scores
@@ -177,6 +171,7 @@ class MultiModalScorerV2(nn.Module):
         dino_model="facebook/dinov2-base",
         use_cross_attention=False,
         dropout=0.2,
+        geometric_channel_scale=1.0,
     ):
         """
         Args:
@@ -184,8 +179,10 @@ class MultiModalScorerV2(nn.Module):
             dino_model: Pretrained DINO for visual branch
             use_cross_attention: If True, use cross-modal attention (Option C)
             dropout: Dropout rate (higher for smaller datasets)
+            geometric_channel_scale: Multiplier for geometric channels (3-5)
         """
         super().__init__()
+        self.geometric_channel_scale = geometric_channel_scale
 
         self.use_cross_attention = use_cross_attention
 
@@ -278,9 +275,8 @@ class MultiModalScorerV2(nn.Module):
         # Geometric Branch
         # ============================================
 
-        # Split RGB and geometric channels
         rgb_only = rgb_geometric[:, :3]
-        geom_only = rgb_geometric[:, 3:]
+        geom_only = rgb_geometric[:, 3:] * self.geometric_channel_scale
 
         # Encode geometric features
         geom_encoded = self.geometric_encoder(geom_only)  # (B, 128, H, W)
@@ -343,12 +339,14 @@ class MultiModalScorerV2_Practical(nn.Module):
     - Total trainable: ~16M params
     """
     
-    def __init__(self, 
+    def __init__(self,
                  geometric_vit='google/vit-base-patch16-224',
                  dino_model='facebook/dinov2-base',
-                 freeze_vit_layers=10,  # Freeze first 10 of 12 layers
-                 dropout=0.4):
+                 freeze_vit_layers=10,
+                 dropout=0.4,
+                 geometric_channel_scale=1.0):
         super().__init__()
+        self.geometric_channel_scale = geometric_channel_scale
         
         # Geometric encoder (from scratch)
         self.geometric_encoder = nn.Sequential(
@@ -412,21 +410,174 @@ class MultiModalScorerV2_Practical(nn.Module):
         return None
     
     def forward(self, rgb, rgb_geometric):
-        # Geometric processing
         rgb_only = rgb_geometric[:, :3]
-        geom_only = rgb_geometric[:, 3:]
+        geom_only = rgb_geometric[:, 3:] * self.geometric_channel_scale
         geom_encoded = self.geometric_encoder(geom_only)
         combined_input = torch.cat([rgb_only, geom_encoded], dim=1)
         vit_input = self.rgb_geom_fusion(combined_input)
-        
-        # Feature extraction
+
         geom_feats = self.geometric_vit(vit_input).pooler_output
-        
+
         with torch.no_grad():
             dino_feats = self.dino(rgb).pooler_output
-        
-        # Fusion
+
         combined = torch.cat([geom_feats, dino_feats], dim=1)
         logits = self.fusion(combined)
-        
+
+        return logits
+
+
+class MultiModalScorerWeightedVit(nn.Module):
+    """
+    Multi-modal scorer that explicitly injects contact-region information
+    into the ViT feature representation via weighted patch pooling.
+
+    MultiModalScorerV2_Practical architecture flow:
+        rgb_geometric → geometric_encoder → rgb_geom_fusion → ViT → CLS token (768-d)
+                                                                           ↓
+        rgb → DINO → DINO features (768-d)  →  concat → [CLS + DINO] (1536-d) → fusion head
+
+    The CLS token is ViT's own aggregation of all patches via self-attention.
+    It may or may not focus on the contact region.
+
+    New architecture flow:
+        rgb_geometric → geometric_encoder → rgb_geom_fusion → ViT → CLS token (768-d)
+                                                               ↓
+                                                     patch tokens (196 × 768)
+                                                               ↓
+                                                  contact-weighted pooling (768-d)
+                                                                           ↓
+        rgb → DINO → DINO features (768-d)  →  concat → [CLS + contact_pooled + DINO] (2304-d) → fusion head
+
+    The contact channel (rgb_geometric[:, 5], shape B×H×W) is downsampled to the
+    ViT patch grid (14×14 → 196 patches), flattened, and used as weights for a
+    weighted mean over the 196 patch tokens. This produces a 768-d "contact-pooled"
+    feature that explicitly captures what the boundary region looks like.
+
+    Why this is better than an attention-correlation loss:
+    - No output_attentions=True needed (no performance penalty)
+    - Works with frozen ViT (pooling happens after the ViT)
+    - Guaranteed signal (contact region always contributes)
+    - Cleaner gradients (simple multiplication + averaging, no Pearson math)
+    """
+
+    def __init__(self,
+                 geometric_vit='google/vit-base-patch16-224',
+                 dino_model='facebook/dinov2-base',
+                 freeze_vit_layers=10,
+                 dropout=0.4,
+                 geometric_channel_scale=1.0):
+        super().__init__()
+        self.geometric_channel_scale = geometric_channel_scale
+
+        # Geometric encoder (from scratch)
+        self.geometric_encoder = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+        )
+
+        self.rgb_geom_fusion = nn.Sequential(
+            nn.Conv2d(3 + 128, 64, kernel_size=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 3, kernel_size=1)
+        )
+
+        # ViT (partially frozen)
+        self.geometric_vit = ViTModel.from_pretrained(geometric_vit)
+
+        # Freeze early layers
+        for name, param in self.geometric_vit.named_parameters():
+            layer_num = self._extract_layer_num(name)
+            if layer_num is not None and layer_num < freeze_vit_layers:
+                param.requires_grad = False
+            else:
+                param.requires_grad = True
+
+        trainable_vit = sum(p.numel() for p in self.geometric_vit.parameters() if p.requires_grad)
+        total_vit = sum(p.numel() for p in self.geometric_vit.parameters())
+        print(f"ViT: {trainable_vit:,} trainable / {total_vit:,} total ({100*trainable_vit/total_vit:.1f}%)")
+
+        # DINO (frozen)
+        self.dino = Dinov2Model.from_pretrained(dino_model)
+        for param in self.dino.parameters():
+            param.requires_grad = False
+        self.dino.eval()
+
+        # Fusion head: input is CLS (768) + contact-pooled (768) + DINO (768) = 2304
+        self.fusion = nn.Sequential(
+            nn.Linear(2304, 768),
+            nn.LayerNorm(768),
+            nn.GELU(),
+            nn.Dropout(dropout),
+
+            nn.Linear(768, 256),
+            nn.LayerNorm(256),
+            nn.GELU(),
+            nn.Dropout(dropout),
+
+            nn.Linear(256, 1)
+        )
+
+    def _extract_layer_num(self, param_name):
+        import re
+        match = re.search(r'encoder\.layer\.(\d+)', param_name)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _contact_weighted_pool(self, last_hidden_state, contact_mask):
+        """
+        Weighted pooling of ViT patch tokens using contact region as weights.
+
+        Args:
+            last_hidden_state: (B, 197, 768) from ViT — CLS + 196 patches
+            contact_mask: (B, H, W) — channel 5 of rgb_geometric
+
+        Returns:
+            pooled: (B, 768) — weighted average of patch tokens
+        """
+        patch_tokens = last_hidden_state[:, 1:, :]  # (B, 196, 768)
+        B, num_patches, dim = patch_tokens.shape
+        grid_side = int(num_patches ** 0.5)  # 14
+
+        contact_resized = F.interpolate(
+            contact_mask.unsqueeze(1),  # (B, 1, H, W)
+            size=(grid_side, grid_side),
+            mode='bilinear',
+            align_corners=False,
+        ).squeeze(1)  # (B, 14, 14)
+
+        weights = contact_resized.reshape(B, num_patches)  # (B, 196)
+        weights = F.relu(weights) + 1e-6  # ensure positive
+        weights_sum = weights.sum(dim=1, keepdim=True)  # (B, 1)
+
+        pooled = torch.bmm(weights.unsqueeze(1), patch_tokens).squeeze(1) / weights_sum  # (B, 768)
+        return pooled
+
+    def forward(self, rgb, rgb_geometric):
+        rgb_only = rgb_geometric[:, :3]
+        geom_only = rgb_geometric[:, 3:] * self.geometric_channel_scale
+        geom_encoded = self.geometric_encoder(geom_only)
+        combined_input = torch.cat([rgb_only, geom_encoded], dim=1)
+        vit_input = self.rgb_geom_fusion(combined_input)
+
+        # Full ViT output with all patch tokens
+        vit_output = self.geometric_vit(vit_input)
+        cls_feats = vit_output.last_hidden_state[:, 0, :]  # (B, 768)
+
+        # Contact-weighted pooling of patch tokens
+        contact_mask = rgb_geometric[:, 5]  # (B, H, W)
+        contact_pooled = self._contact_weighted_pool(vit_output.last_hidden_state, contact_mask)
+
+        with torch.no_grad():
+            dino_feats = self.dino(rgb).pooler_output
+
+        combined = torch.cat([cls_feats, contact_pooled, dino_feats], dim=1)
+        logits = self.fusion(combined)
+
         return logits

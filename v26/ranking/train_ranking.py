@@ -5,15 +5,15 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-# Import your dataset and models
 from dataset_ranking import (
     PrecomposedAlignmentDataset,
     ShuffledBatchSampler,
     collate_alignment_samples,
 )
-from models_ranking import MultiModalScorerV2_Practical, GeometricScorer
-from loss_ranking import AdaptiveTopNRankingLoss, PerceptualBoundaryLoss
+from models_ranking import MultiModalScorerV2_Practical, MultiModalScorerWeightedVit, GeometricScorer, BaselineScorer
+from loss_ranking import AdaptiveTopNRankingLoss, BoundaryPairwiseCorrelationLoss, BoundaryPseudoRankingLoss
 from training_utils import evaluate_ranking, estimate_data_needs, diagnose_data_sufficiency, plot_training_history
+from config import Config
 
 
 def train_model(
@@ -28,16 +28,16 @@ def train_model(
     device="cuda",
     save_dir="checkpoints",
     model_name="model",
-    early_stopping_patience=10,  # NEW: Stop if no improvement
-    bce_weight=0.15,  # Weight for BCE loss (lower for ranking-focused training)
-    ranking_weight=0.55,  # Weight for Adaptive ranking loss (higher priority)
-    ranking_margin=0.3,  # Margin for ranking loss
+    early_stopping_patience=10,
+    bce_weight=0.15,
+    ranking_weight=0.55,
+    ranking_margin=0.3,
     boundary_weight=0.3,
-    hard_negative_weight=2.0,  # Weight for hard negatives in ranking loss
-    top_n=3,  # Target top-N positions for AdaptiveTopNRankingLoss
-    temperature=1.0,  # Temperature for smooth position penalty
-    max_norm=1.0, # Gradient clipping (helps with small data)
-    pos_weight_val_BCE = 4.0 
+    hard_negative_weight=2.0,
+    top_n=3,
+    temperature=1.0,
+    max_norm=1.0,
+    pos_weight_val_BCE=4.0,
 ):
     """
     Training with combined BCE + AdaptiveTopNRankingLoss and early stopping for small datasets.
@@ -45,7 +45,6 @@ def train_model(
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
 
-    # Dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -55,10 +54,6 @@ def train_model(
         num_workers=4,
         pin_memory=True,
     )
-
-    # for batch in train_loader:
-    #     debug_group_structure(batch)
-    #     breakpoint()
 
     val_loader = DataLoader(
         val_dataset,
@@ -70,35 +65,32 @@ def train_model(
         pin_memory=True,
     )
 
-    # Loss functions
-
-    bce_criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight_val_BCE]).to(device))  # More stable than BCE + Sigmoid
+    bce_criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight_val_BCE]).to(device))
     ranking_criterion = AdaptiveTopNRankingLoss(
         top_n=top_n,
         margin=ranking_margin,
         hard_negative_weight=hard_negative_weight,
         temperature=temperature,
     )
-    boundary_criterion = PerceptualBoundaryLoss()  # Start simple
-    
+    boundary_criterion = BoundaryPairwiseCorrelationLoss()
+    # boundary_criterion = BoundaryPseudoRankingLoss()
+
     if optimizer is not None:
         optimizer = optimizer
     else:
         optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    # Cosine annealing with warmup
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=lr,
         epochs=num_epochs,
         steps_per_epoch=len(train_loader),
-        pct_start=0.1,  # 10% warmup
+        pct_start=0.1,
         anneal_strategy="cos",
     )
 
     model = model.to(device)
 
-    # Early stopping
     best_val_acc = 0.0
     patience_counter = 0
 
@@ -122,14 +114,13 @@ def train_model(
 
     print(f"Training {model_name} for up to {num_epochs} epochs")
     print(f"Early stopping patience: {early_stopping_patience}")
-    print(f"Loss: BCE*{bce_weight} + AdaptiveTopNRankingLoss*{ranking_weight} + PerceptualBoundaryLoss*{boundary_weight}")
+    print(f"Loss: BCE*{bce_weight} + AdaptiveTopNRankingLoss*{ranking_weight} + BoundaryPairwiseCorrelationLoss*{boundary_weight}")
     print(f"  AdaptiveTopNRankingLoss: top_n={top_n}, margin={ranking_margin}, temperature={temperature}")
     print(f"Train samples: {len(train_dataset)} pairs")
     print(f"Val samples: {len(val_dataset)} pairs")
     print("-" * 60)
 
     for epoch in range(1, num_epochs + 1):
-        # Training
         model.train()
         train_loss = 0.0
         train_bce_loss = 0.0
@@ -142,41 +133,29 @@ def train_model(
         for batch in pbar:
             rgb = batch["rgb"].to(device)
             rgb_geometric = batch["rgb_geometric"].to(device)
-            labels = batch["labels"].to(device) #.unsqueeze(1)  # (B, 1)
+            labels = batch["labels"].to(device)
             difficulties = batch["difficulties"]
             group_sizes = batch['group_sizes']
 
             optimizer.zero_grad()
 
-            # Forward
-            if hasattr(model, 'dino'):  # MultiModalScorer
+            if isinstance(model, MultiModalScorerV2_Practical) or isinstance(model, MultiModalScorerWeightedVit):
                 logits = model(rgb, rgb_geometric).squeeze()
-            elif hasattr(model, 'projection'):
+            elif isinstance(model, GeometricScorer):
                 logits = model(rgb_geometric).squeeze()
             else:
                 logits = model(rgb).squeeze()
 
-            # Convert to [0, 1] for ranking loss
-            scores = torch.sigmoid(logits).squeeze()  
+            scores = torch.sigmoid(logits).squeeze()
 
-            # Loss 1: BCE Loss
             bce_loss = bce_criterion(logits, labels.squeeze())
-
-            # Loss 2: Ranking Loss
             ranking_loss = ranking_criterion(scores, labels.squeeze(), difficulties, group_sizes=group_sizes)
+            boundary_loss = boundary_criterion(rgb, rgb_geometric, scores, group_sizes=group_sizes)
 
-            # Loss 3: Boundary consistency (auxiliary)
-            boundary_loss = boundary_criterion(rgb, rgb_geometric, labels)
-
-            # Combined loss
             loss = bce_weight * bce_loss + ranking_weight * ranking_loss + boundary_weight * boundary_loss
 
-            # Backward
             loss.backward()
-
-            # Gradient clipping (helps with small data)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
-
             optimizer.step()
             scheduler.step()
 
@@ -186,22 +165,19 @@ def train_model(
             train_boundary_loss += boundary_loss.item()
             num_batches += 1
 
-            pbar.set_postfix(
-                {
-                    "loss": f"{loss.item():.4f}",
-                    "bce": f"{bce_loss.item():.4f}",
-                    "rank": f"{ranking_loss.item():.4f}",
-                    "boundary": f"{boundary_loss.item():.4f}",
-                    "lr": f"{scheduler.get_last_lr()[0]:.6f}",
-                }
-            )
+            pbar.set_postfix({
+                "loss": f"{loss.item():.4f}",
+                "bce": f"{bce_loss.item():.4f}",
+                "rank": f"{ranking_loss.item():.4f}",
+                "boundary": f"{boundary_loss.item():.4f}",
+                "lr": f"{scheduler.get_last_lr()[0]:.6f}",
+            })
 
         avg_train_loss = train_loss / num_batches
         avg_train_bce = train_bce_loss / num_batches
         avg_train_ranking = train_ranking_loss / num_batches
         avg_train_boundary = train_boundary_loss / num_batches
 
-        # Validation
         model.eval()
         val_loss = 0.0
         val_bce_loss = 0.0
@@ -213,12 +189,11 @@ def train_model(
             for batch in val_loader:
                 rgb = batch["rgb"].to(device)
                 rgb_geometric = batch["rgb_geometric"].to(device)
-                labels = batch["labels"].to(device) #.unsqueeze(1) # no need for unsqueeze, as we would squeeze them later :)
+                labels = batch["labels"].to(device)
                 difficulties = batch["difficulties"]
                 group_sizes = batch['group_sizes']
 
-                # Forward
-                if hasattr(model, 'dino'):  # MultiModalScorer
+                if hasattr(model, 'dino'):
                     logits = model(rgb, rgb_geometric).squeeze()
                 elif hasattr(model, 'projection'):
                     logits = model(rgb_geometric).squeeze()
@@ -229,7 +204,7 @@ def train_model(
 
                 bce_loss = bce_criterion(logits, labels.squeeze())
                 ranking_loss = ranking_criterion(scores, labels.squeeze(), difficulties, group_sizes=group_sizes)
-                boundary_loss = boundary_criterion(rgb, rgb_geometric, labels)                
+                boundary_loss = boundary_criterion(rgb, rgb_geometric, scores, group_sizes=group_sizes)
                 loss = bce_weight * bce_loss + ranking_weight * ranking_loss + boundary_weight * boundary_loss
 
                 val_loss += loss.item()
@@ -242,12 +217,17 @@ def train_model(
         avg_val_bce = val_bce_loss / num_batches
         avg_val_ranking = val_ranking_loss / num_batches
         avg_val_boundary = val_boundary_loss / num_batches
-        
-        # Ranking accuracy (Top-1, Top-3, Top-5)
-        model_type = "geometric" if "geometric" == model_name else "multimodal"
-        val_acc, val_top3_acc, val_top5_acc, avg_pos, avg_neg, avg_hard_neg = evaluate_ranking(model, val_loader, device, model_type=model_type)
 
-        # Record history
+        if isinstance(model, MultiModalScorerV2_Practical) or isinstance(model, MultiModalScorerWeightedVit):
+            model_type = "multimodal"
+        elif isinstance(model, GeometricScorer):
+            model_type = "geometric"
+        else:
+            model_type = "baseline"
+        val_acc, val_top3_acc, val_top5_acc, avg_pos, avg_neg, avg_hard_neg = evaluate_ranking(
+            model, val_loader, device, model_type=model_type
+        )
+
         history["train_loss"].append(avg_train_loss)
         history["train_bce_loss"].append(avg_train_bce)
         history["train_ranking_loss"].append(avg_train_ranking)
@@ -273,12 +253,10 @@ def train_model(
             f"LR: {scheduler.get_last_lr()[0]:.6f}"
         )
 
-        # Early stopping check
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             patience_counter = 0
 
-            # Save best model
             checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -293,7 +271,6 @@ def train_model(
             patience_counter += 1
             print(f"  No improvement ({patience_counter}/{early_stopping_patience})")
 
-        # Early stopping
         if patience_counter >= early_stopping_patience:
             print(f"\nEarly stopping triggered after {epoch} epochs")
             print(f"Best validation accuracy: {best_val_acc:.3f}")
@@ -302,123 +279,132 @@ def train_model(
     print("-" * 60)
     print(f"Training complete! Best validation accuracy: {best_val_acc:.3f}")
 
-    # Plot training curves
     plot_training_history(history, save_dir / f"{model_name}_history.png")
 
     return model, history
 
+
 def main():
     """Main training script."""
+    cfg = Config()
 
-    # Configuration
-    DATA_ROOT = "/media/lucap/big_data/datasets/wikiart_PAD/PAD_dataset__Wikiart"
-    # "/run/user/1000/gvfs/sftp:host=gpu1.dsi.unive.it,user=luca.palmieri/home/ssd/datasets/RePAIR_ReLab_luca/PAD_v4"
-    BATCH_SIZE = 8
-    NUM_EPOCHS = 20
-    EARLY_STOPPING_PATIENCE = 4 # NUM_EPOCHS // 4
-    LEARNING_RATE = 1e-4
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    MAX_NEGATIVES_PER_POSITIVE = 12 # use all available
-      # Adjusted for your data size
+    print(f"Using device: {cfg.training.DEVICE}")
 
-
-    # DATASET PARAMETERS
-    RADIUS = 25
-    THRESHOLD = 25
-
-
-    # model parameters
-    FROZEN_LAYERS = 8
-    DROPOUT = 0.5
-    # DINO PARAMETERS
-    DINO_MODEL = "facebook/dinov2-base"
-    VIT_MODEL = "google/vit-base-patch16-224"
-
-    print(f"Using device: {DEVICE}")
-
-    # Load full dataset
     full_dataset = PrecomposedAlignmentDataset(
-        data_root=DATA_ROOT,
-        max_negatives_per_positive=MAX_NEGATIVES_PER_POSITIVE,
-        radius=RADIUS,
-        threshold=THRESHOLD,
+        data_root=cfg.data.DATA_ROOT,
+        max_negatives_per_positive=cfg.data.MAX_NEGATIVES_PER_POSITIVE,
+        radius=cfg.data.RADIUS,
+        threshold=cfg.data.THRESHOLD,
+        debug_mode=cfg.data.DEBUG,
     )
 
-    # *** CHANGED: Split by puzzles, not random ***
     train_dataset, val_dataset = PrecomposedAlignmentDataset.create_puzzle_split(
-        full_dataset, radius=RADIUS, threshold=THRESHOLD, train_ratio=0.8, seed=42
+        full_dataset, radius=cfg.data.RADIUS, threshold=cfg.data.THRESHOLD,
+        train_ratio=cfg.data.TRAIN_RATIO, seed=cfg.data.SEED,
     )
 
     print(f"\n=== Dataset Ready ===")
     print(f"Train: {len(train_dataset)} pairs")
     print(f"Val: {len(val_dataset)} pairs")
 
-    # breakpoint()
-
-    # Verify no overlap
     train_puzzles = set(k.split("|")[0] for k in train_dataset.pair_keys)
     val_puzzles = set(k.split("|")[0] for k in val_dataset.pair_keys)
     overlap = train_puzzles & val_puzzles
 
     if overlap:
-        print(f"⚠️  WARNING: {len(overlap)} puzzles appear in both train and val!")
+        print(f"WARNING: {len(overlap)} puzzles appear in both train and val!")
     else:
-        print("✓ No puzzle overlap between train and val")
+        print("No puzzle overlap between train and val")
 
     print("\n" + "=" * 60)
-    print("TRAINING MODEL 5: RGB + Geometry + DINO (with more frozen layers)")
+    print("TRAINING MODEL: RGB + Geometry + DINO (with geometric channel scaling)")
     print("=" * 60)
 
     model = MultiModalScorerV2_Practical(
-        dino_model=DINO_MODEL,
-        geometric_vit=VIT_MODEL,
-        freeze_vit_layers=FROZEN_LAYERS,  # Only train last 2 layers
-        dropout=DROPOUT
+        dino_model=cfg.model.DINO_MODEL,
+        geometric_vit=cfg.model.VIT_MODEL,
+        freeze_vit_layers=cfg.model.FROZEN_LAYERS,
+        dropout=cfg.model.DROPOUT,
+        geometric_channel_scale=cfg.model.GEOMETRIC_CHANNEL_SCALE,
     )
 
-    # model = GeometricScorer()
-    # # breakpoint()
-    # model_v2, history_v2 = train_model(
-    #     model_v2,
-    #     train_dataset,
-    #     val_dataset,
-    #     num_epochs=NUM_EPOCHS,
-    #     batch_size=BATCH_SIZE,
-    #     lr=LEARNING_RATE,
-    #     device=DEVICE,
-    #     model_name='geometric'
-    # )
-
-    # Train with strong regularization
-    optimizer = optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=cfg.training.LEARNING_RATE,
+        weight_decay=cfg.training.WEIGHT_DECAY,
+    )
 
     estimate_data_needs(model, train_dataset)
 
-    # Train with combined BCE + AdaptiveTopNRankingLoss
     model, history = train_model(
         model,
         train_dataset,
         val_dataset,
         optimizer=optimizer,
-        num_epochs=NUM_EPOCHS,
-        batch_size=BATCH_SIZE,
-        lr=LEARNING_RATE,
-        weight_decay=1e-4,
-        early_stopping_patience=EARLY_STOPPING_PATIENCE,
+        num_epochs=cfg.training.NUM_EPOCHS,
+        batch_size=cfg.training.BATCH_SIZE,
+        lr=cfg.training.LEARNING_RATE,
+        weight_decay=cfg.training.WEIGHT_DECAY,
+        early_stopping_patience=cfg.training.EARLY_STOPPING_PATIENCE,
         model_name="multimodal_bceW_wikiart_frozen8",
-        # Combined loss weights (ranking-focused)
-        bce_weight=0.15,  # Lower weight for BCE classification loss
-        ranking_weight=0.55,  # Higher weight for Adaptive ranking loss
-        boundary_weight=0.3,  #  weight for boundary loss
-        # AdaptiveTopNRankingLoss parameters
-        ranking_margin=0.3,  # Margin for ranking loss
-        hard_negative_weight=2.0,  # Weight for hard negatives in ranking loss
-        top_n=3,  # Target top-3 positions
-        temperature=1.0,  # Smoothness of position penalty
+        bce_weight=cfg.loss.BCE_WEIGHT,
+        ranking_weight=cfg.loss.RANKING_WEIGHT,
+        boundary_weight=cfg.loss.BOUNDARY_WEIGHT,
+        ranking_margin=cfg.loss.RANKING_MARGIN,
+        hard_negative_weight=cfg.loss.HARD_NEGATIVE_WEIGHT,
+        top_n=cfg.loss.TOP_N,
+        temperature=cfg.loss.TEMPERATURE,
+        max_norm=cfg.training.GRAD_CLIP_MAX_NORM,
+        pos_weight_val_BCE=cfg.training.BCE_POS_WEIGHT,
     )
 
-    # Use it
     diagnose_data_sufficiency(history)
+
+    # ============================================================
+    # Alternative model: MultiModalScorerWeightedVit
+    # Uses contact-region weighted pooling of ViT patch tokens
+    # in addition to the CLS token and DINO features.
+    # Uncomment below to use it instead of MultiModalScorerV2_Practical.
+    # ============================================================
+    # model = MultiModalScorerWeightedVit(
+    #     dino_model=cfg.model.DINO_MODEL,
+    #     geometric_vit=cfg.model.VIT_MODEL,
+    #     freeze_vit_layers=cfg.model.FROZEN_LAYERS,
+    #     dropout=cfg.model.DROPOUT,
+    #     geometric_channel_scale=cfg.model.GEOMETRIC_CHANNEL_SCALE,
+    # )
+    
+    # optimizer = optim.AdamW(
+    #     model.parameters(),
+    #     lr=cfg.training.LEARNING_RATE,
+    #     weight_decay=cfg.training.WEIGHT_DECAY,
+    # )
+    
+    # estimate_data_needs(model, train_dataset)
+    
+    # model, history = train_model(
+    #     model,
+    #     train_dataset,
+    #     val_dataset,
+    #     optimizer=optimizer,
+    #     num_epochs=cfg.training.NUM_EPOCHS,
+    #     batch_size=cfg.training.BATCH_SIZE,
+    #     lr=cfg.training.LEARNING_RATE,
+    #     weight_decay=cfg.training.WEIGHT_DECAY,
+    #     early_stopping_patience=cfg.training.EARLY_STOPPING_PATIENCE,
+    #     model_name="multimodal_weighted_vit",
+    #     bce_weight=cfg.loss.BCE_WEIGHT,
+    #     ranking_weight=cfg.loss.RANKING_WEIGHT,
+    #     boundary_weight=cfg.loss.BOUNDARY_WEIGHT,
+    #     ranking_margin=cfg.loss.RANKING_MARGIN,
+    #     hard_negative_weight=cfg.loss.HARD_NEGATIVE_WEIGHT,
+    #     top_n=cfg.loss.TOP_N,
+    #     temperature=cfg.loss.TEMPERATURE,
+    #     max_norm=cfg.training.GRAD_CLIP_MAX_NORM,
+    #     pos_weight_val_BCE=cfg.training.BCE_POS_WEIGHT,
+    # )
+    
+    # diagnose_data_sufficiency(history)
 
 
 if __name__ == "__main__":

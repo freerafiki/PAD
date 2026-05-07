@@ -258,6 +258,190 @@ class PerceptualBoundaryLoss(nn.Module):
         
         return torch.stack(losses).mean()
 
+
+def _compute_boundary_similarity(rgb, rgb_geometric, dilation_radius=3,
+                                  mask_threshold=0.5, contact_threshold=0.3):
+    """
+    Compute boundary color similarity per sample.
+
+    For each sample (image):
+    1. Extract contact region (channel 5), piece A mask (channel 3), piece B mask (channel 4)
+    2. Dilate contact region to bridge small gaps (handles eroded pieces)
+    3. Intersect dilated contact with piece A mask -> side A region (RGB averaged only within A's boundary)
+    4. Intersect dilated contact with piece B mask -> side B region (RGB averaged only within B's boundary)
+    5. Compute L2 distance between average RGB of side A and side B
+    6. Return similarity = 1 / (1 + L2_distance) in [0, 1]
+
+    IMPORTANT: Masks ensure RGB averaging happens only within piece A and piece B regions.
+    The dilation bridges small gaps between eroded pieces, but masks keep the averaging
+    within each piece's actual boundary - never averaging from the gap/void between pieces.
+
+    Dilation is implemented via max_pool2d (pure GPU, no CPU transfer).
+
+    Args:
+        rgb: (B, 3, H, W) normalized RGB tensor
+        rgb_geometric: (B, 6, H, W) tensor with geometric features
+        dilation_radius: Number of pixels to dilate the contact region
+        mask_threshold: Threshold for piece masks (> threshold = inside piece)
+        contact_threshold: Threshold for contact region (> threshold = in contact)
+
+    Returns:
+        similarities: (B,) tensor of similarity values in [0, 1]
+    """
+    contact_mask = rgb_geometric[:, 5]
+    mask_A = rgb_geometric[:, 3] > mask_threshold
+    mask_B = rgb_geometric[:, 4] > mask_threshold
+
+    B, _, H, W = rgb.shape
+
+    contact_binary = (contact_mask > contact_threshold).float().unsqueeze(1)
+    kernel_size = 2 * dilation_radius + 1
+    contact_dilated = F.max_pool2d(
+        contact_binary, kernel_size=kernel_size, stride=1, padding=dilation_radius
+    ).squeeze(1) > 0.5
+
+    similarities = []
+
+    for b in range(B):
+        side_A = contact_dilated[b] & mask_A[b]
+        side_B = contact_dilated[b] & mask_B[b]
+
+        if side_A.sum() == 0 or side_B.sum() == 0:
+            similarities.append(torch.tensor(0.0, device=rgb.device))
+            continue
+
+        rgb_A = rgb[b][:, side_A].mean(dim=1)
+        rgb_B = rgb[b][:, side_B].mean(dim=1)
+
+        color_diff = torch.sqrt(((rgb_A - rgb_B) ** 2).sum())
+        similarity = 1.0 / (1.0 + color_diff)
+        similarities.append(similarity)
+
+    return torch.stack(similarities)
+
+
+class BoundaryPairwiseCorrelationLoss(nn.Module):
+    """
+    Option A: Boundary Pairwise Correlation Loss.
+
+    Concept:
+    For each sample, compute boundary color similarity directly.
+    Use MSE between the model's predicted scores and the raw similarity values.
+    The model learns to predict absolute boundary quality as a score.
+
+    IMPORTANT:
+    - Boundary similarity is computed per sample (per image), not across images.
+    - RGB averaging uses piece masks so values come only from piece A's and piece B's boundaries.
+    - The dilation bridges small gaps between eroded pieces, but masks keep averaging within pieces.
+
+    Pros:
+    - Direct, interpretable signal: score should predict boundary quality
+    - Uses all samples (not just positives), fires even in 93%-negative batches
+    - O(n) per group - very efficient
+    - Easy to combine with existing losses
+
+    Cons:
+    - Boundary similarity is a proxy, not perfect ground truth
+    - Needs careful scaling relative to other loss terms
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, rgb, rgb_geometric, scores, group_sizes=None):
+        similarities = _compute_boundary_similarity(rgb, rgb_geometric)
+
+        if group_sizes is None or len(group_sizes) == 0:
+            return torch.tensor(0.0, device=scores.device, requires_grad=True)
+
+        return F.mse_loss(scores, similarities)
+
+
+class BoundaryPseudoRankingLoss(nn.Module):
+    """
+    Option B: Boundary Pseudo-Ranking Loss.
+
+    Concept:
+    Within each group, compute boundary color similarity for all samples.
+    Normalize these similarities to [0, 1] (min-max within group) to create
+    pseudo-target scores. Then use MSE loss between the model's predicted scores
+    and these pseudo-targets. Additionally, penalize when the sample with highest
+    boundary similarity doesn't also have the highest predicted score.
+
+    Pseudo-targets are computed for ALL samples in the group, including those
+    with minimal or no boundary region (they get low similarity values naturally).
+
+    IMPORTANT:
+    - Boundary similarity is computed per sample (per image), not across images.
+    - RGB averaging uses piece masks so values come only from piece A's and piece B's boundaries.
+    - The dilation bridges small gaps between eroded pieces, but masks keep averaging within pieces.
+
+    Pros:
+    - O(n) per group (efficient)
+    - Smooth, continuous signal
+    - Naturally handles the imbalanced dataset
+    - Complementary to label-based losses (learns visual quality directly)
+
+    Cons:
+    - Pseudo-targets can be noisy (a negative might coincidentally have good boundary similarity)
+    - MSE on scores might not play perfectly with BCE (different loss landscapes)
+    - Min-max normalization discards absolute quality information
+    """
+
+    def __init__(self, mse_weight=1.0, top1_margin=0.2, top1_weight=1.0):
+        super().__init__()
+        self.mse_weight = mse_weight
+        self.top1_margin = top1_margin
+        self.top1_weight = top1_weight
+
+    def forward(self, rgb, rgb_geometric, scores, group_sizes=None):
+        similarities = _compute_boundary_similarity(rgb, rgb_geometric)
+
+        if group_sizes is None:
+            return torch.tensor(0.0, device=scores.device, requires_grad=True)
+
+        total_loss = 0.0
+        num_groups = 0
+
+        start_idx = 0
+        for group_size in group_sizes:
+            end_idx = start_idx + group_size
+            group_sim = similarities[start_idx:end_idx]
+            group_scores = scores[start_idx:end_idx]
+
+            start_idx = end_idx
+
+            if len(group_sim) < 2:
+                continue
+
+            sim_min = group_sim.min()
+            sim_max = group_sim.max()
+            sim_range = sim_max - sim_min
+            if sim_range < 1e-6:
+                continue
+
+            pseudo_targets = (group_sim - sim_min) / sim_range
+
+            mse_loss = F.mse_loss(group_scores, pseudo_targets)
+
+            best_sim_idx = group_sim.argmax()
+            best_score_idx = group_scores.argmax()
+
+            if best_sim_idx != best_score_idx:
+                top1_loss = torch.clamp(
+                    self.top1_margin + group_scores[best_score_idx] - group_scores[best_sim_idx],
+                    min=0
+                )
+            else:
+                top1_loss = torch.tensor(0.0, device=scores.device)
+
+            group_loss = self.mse_weight * mse_loss + self.top1_weight * top1_loss
+            total_loss += group_loss
+            num_groups += 1
+
+        return total_loss / max(num_groups, 1)
+
+
 class TopNRankingLoss(nn.Module):
     """
     Ranking loss that penalizes when positive is not in top N positions.
@@ -450,10 +634,7 @@ class AdaptiveTopNRankingLoss(nn.Module):
             pos_idx = torch.where(pos_mask)[0][0]
             neg_mask = ~pos_mask
             
-            if pos_idx > 0:
-                pos_score = group_scores[pos_idx]
-            else:
-                pos_score = 1
+            pos_score = group_scores[pos_idx]
             neg_scores = group_scores[neg_mask]
             
             if len(neg_scores) == 0:
@@ -546,10 +727,7 @@ class AdaptiveTopNRankingLoss(nn.Module):
             pos_idx = torch.where(pos_mask)[0][0]
             neg_mask = ~pos_mask
             
-            if pos_idx > 0:
-                pos_score = group_scores[pos_idx]
-            else:
-                pos_score = 1
+            pos_score = group_scores[pos_idx]
             neg_scores = group_scores[neg_mask]
             
             if len(neg_scores) == 0:

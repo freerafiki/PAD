@@ -300,7 +300,8 @@ class PrecomposedAlignmentDataset(Dataset):
                  hard_negative_ratio=0.5,
                  radius=20,
                  threshold=15,
-                 transform=None):
+                 transform=None,
+                 debug_mode=False):
         """
         Args:
             data_root: Path to data directory with positive/negative/hard_negative/non_neighbour folders
@@ -311,12 +312,14 @@ class PrecomposedAlignmentDataset(Dataset):
             transform: Optional torchvision transforms for RGB images
             include_non_neighbours: If True, include non-neighbour pairs in training
             non_neighbour_ratio: Fraction of batches that should be non-neighbour (0.0-1.0)
+            debug_mode: If True, limit dataset to 1000 images per category for fast testing
         """
         self.data_root = Path(data_root)
         self.max_negatives_per_positive = max_negatives_per_positive
         self.hard_negative_ratio = hard_negative_ratio
         self.radius = radius
         self.threshold = threshold
+        self.debug_mode = debug_mode
 
         self.transform = transform or transforms.Compose([
             transforms.Resize((224, 224)),
@@ -359,7 +362,7 @@ class PrecomposedAlignmentDataset(Dataset):
         Returns:
             dict: {pair_key: {'positive': [...], 'negative': [...], 'hard_negative': [...], 'non_neighbour': [...]}}
         """
-        # from itertools import islice
+        from itertools import islice
 
         pairs = {}
         # non_neighbour_pairs = {}
@@ -373,8 +376,8 @@ class PrecomposedAlignmentDataset(Dataset):
                 print(f"Warning: {images_dir} does not exist")
                 continue
             
-            # for img_path in islice(images_dir.glob('*.png'), 10000):
-            for img_path in images_dir.glob('*.png'):
+            for img_path in (islice(images_dir.glob('*.png'), 1000) if self.debug_mode else images_dir.glob('*.png')):
+            # for img_path in images_dir.glob('*.png'):
                 # Classify file
                 file_type = classify_file(img_path.name)
                 if file_type == 'ignore':

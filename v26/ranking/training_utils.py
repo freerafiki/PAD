@@ -213,6 +213,8 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
             # Get logits and convert to probabilities
             if model_type == 'geometric':
                 logits = model(rgb_geometric)
+            elif model_type == 'baseline':
+                logits = model(rgb)
             else:
                 logits = model(rgb, rgb_geometric)
             scores = torch.sigmoid(logits)  # Convert to [0, 1]
@@ -243,21 +245,27 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
                 else:
                     # we are in the "neighbours" group
                     # Get positive and negative scores
-                    pos_idx_in_group = torch.where(pos_mask)[0][0]
+                    pos_idx_in_group = torch.where(pos_mask)[0][0].item()
                     neg_mask = ~pos_mask
-                    # pos_score = group_scores[pos_idx_in_group]
-                    # neg_scores = group_scores[neg_mask]
-                    
-                    # Top-1: positive is ranked first
-                    if pos_idx_in_group == 0:
+
+                    group_scores_arr = np.array(group_scores)
+                    if pos_idx_in_group >= len(group_scores_arr):
+                        start_idx = end_idx
+                        continue
+
+                    # Rank of positive: count how many samples have a higher score
+                    pos_rank = int(np.sum(group_scores_arr > group_scores_arr[pos_idx_in_group]))
+
+                    # Top-1: positive has the highest score
+                    if pos_rank == 0:
                         correct_top1 += 1
                     
-                    # Top-3: positive is in top 3
-                    if pos_idx_in_group < 3:
+                    # Top-3: positive is in top 3 highest scores
+                    if pos_rank < 3:
                         correct_top3 += 1
                     
-                    # Top-5: positive is in top 5
-                    if pos_idx_in_group < 5:
+                    # Top-5: positive is in top 5 highest scores
+                    if pos_rank < 5:
                         correct_top5 += 1
 
                     total_groups_with_positive += 1
