@@ -1,186 +1,98 @@
-import matplotlib.pyplot as plt 
-import numpy as np 
-import torch 
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
 
 def plot_training_history(history, save_path):
-    """Plot training curves."""
-    fig, axes = plt.subplots(3, 4, figsize=(24, 14))
+    """
+    Plot training curves in a 2x4 grid.
+
+    Row 0: Loss curves (total + per-component)
+    Row 1: Ranking accuracy, score trends, score margins, overfitting gap
+
+    All 8 panels are used — no dead space.
+    """
+    fig, axes = plt.subplots(2, 4, figsize=(24, 10))
 
     epochs = range(1, len(history["train_loss"]) + 1)
 
-    # Total Loss
-    axes[0, 0].plot(epochs, history["train_loss"], label="Train Loss")
-    axes[0, 0].plot(epochs, history["val_loss"], label="Val Loss")
+    axes[0, 0].plot(epochs, history["train_loss"], label="Train", color="steelblue")
+    axes[0, 0].plot(epochs, history["val_loss"], label="Val", color="coral", linewidth=2)
     axes[0, 0].set_xlabel("Epoch")
     axes[0, 0].set_ylabel("Loss")
     axes[0, 0].set_title("Total Loss (BCE + Ranking + Boundary)")
     axes[0, 0].legend()
-    axes[0, 0].grid(True)
+    axes[0, 0].grid(True, alpha=0.4)
 
-    # BCE Loss
-    axes[0, 1].plot(epochs, history["train_bce_loss"], label="Train BCE", color="blue")
-    axes[0, 1].plot(epochs, history["val_bce_loss"], label="Val BCE", color="orange")
+    axes[0, 1].plot(epochs, history["train_bce_loss"], label="Train", color="steelblue")
+    axes[0, 1].plot(epochs, history["val_bce_loss"], label="Val", color="coral", linewidth=2)
     axes[0, 1].set_xlabel("Epoch")
     axes[0, 1].set_ylabel("Loss")
     axes[0, 1].set_title("BCE Loss")
     axes[0, 1].legend()
-    axes[0, 1].grid(True)
+    axes[0, 1].grid(True, alpha=0.4)
 
-    # Ranking Loss
-    axes[0, 2].plot(epochs, history["train_ranking_loss"], label="Train Ranking", color="green")
-    axes[0, 2].plot(epochs, history["val_ranking_loss"], label="Val Ranking", color="red")
+    axes[0, 2].plot(epochs, history["train_ranking_loss"], label="Train", color="steelblue")
+    axes[0, 2].plot(epochs, history["val_ranking_loss"], label="Val", color="coral", linewidth=2)
     axes[0, 2].set_xlabel("Epoch")
     axes[0, 2].set_ylabel("Loss")
     axes[0, 2].set_title("Ranking Loss")
     axes[0, 2].legend()
-    axes[0, 2].grid(True)
+    axes[0, 2].grid(True, alpha=0.4)
 
-    # Boundary Loss
-    axes[0, 3].plot(epochs, history["train_boundary_loss"], label="Train Boundary", color="green")
-    axes[0, 3].plot(epochs, history["val_boundary_loss"], label="Val Boundary", color="red")
+    axes[0, 3].plot(epochs, history["train_boundary_loss"], label="Train", color="steelblue")
+    axes[0, 3].plot(epochs, history["val_boundary_loss"], label="Val", color="coral", linewidth=2)
     axes[0, 3].set_xlabel("Epoch")
     axes[0, 3].set_ylabel("Loss")
     axes[0, 3].set_title("Boundary Loss")
     axes[0, 3].legend()
-    axes[0, 3].grid(True)
+    axes[0, 3].grid(True, alpha=0.4)
 
-    # Top-1, Top-3, Top-5 Accuracy
-    axes[1, 0].plot(epochs, history["val_accuracy"], label="Top-1", color="green", linewidth=2)
-    axes[1, 0].plot(epochs, history["val_top3_accuracy"], label="Top-3", color="blue", linewidth=2)
-    axes[1, 0].plot(epochs, history["val_top5_accuracy"], label="Top-5", color="purple", linewidth=2)
+    axes[1, 0].plot(epochs, history["val_accuracy"], label="Top-1", color="#2ca02c", linewidth=2)
+    axes[1, 0].plot(epochs, history["val_top3_accuracy"], label="Top-3", color="#1f77b4", linewidth=2)
+    axes[1, 0].plot(epochs, history["val_top5_accuracy"], label="Top-5", color="#9467bd", linewidth=2)
     axes[1, 0].set_xlabel("Epoch")
     axes[1, 0].set_ylabel("Accuracy")
-    axes[1, 0].set_title("Ranking Accuracy (Top-1, Top-3, Top-5)")
-    axes[1, 0].grid(True)
-    axes[1, 0].legend()
+    axes[1, 0].set_title("Ranking Accuracy")
     axes[1, 0].set_ylim([0, 1.05])
+    axes[1, 0].legend(loc="lower right")
+    axes[1, 0].grid(True, alpha=0.4)
 
-    # Score distribution
-    axes[1, 1].plot(epochs, history["val_pos_score"], label="Avg Positive Score", color="green")
-    axes[1, 1].plot(epochs, history["val_neg_score"], label="Avg Negative Score", color="red")
-    axes[1, 1].plot(epochs, history["val_hard_neg_score"], label="Avg Hard Neg Score", color="orange")
+    axes[1, 1].plot(epochs, history["val_pos_score"], label="Positive", color="#2ca02c")
+    axes[1, 1].plot(epochs, history["val_neg_score"], label="Negative", color="#d62728")
+    axes[1, 1].plot(epochs, history["val_hard_neg_score"], label="Hard Neg", color="#ff7f0e")
     axes[1, 1].set_xlabel("Epoch")
-    axes[1, 1].set_ylabel("Score")
+    axes[1, 1].set_ylabel("Avg Score")
     axes[1, 1].set_title("Average Scores by Class")
     axes[1, 1].legend()
-    axes[1, 1].grid(True)
+    axes[1, 1].grid(True, alpha=0.4)
 
-    # Score separation (margin)
-    margin = np.array(history["val_pos_score"]) - np.array(history["val_neg_score"])
-    hard_margin = np.array(history["val_pos_score"]) - np.array(history["val_hard_neg_score"])
-    axes[1, 2].plot(epochs, margin, label="Pos - Neg Margin", color="purple")
-    axes[1, 2].plot(epochs, hard_margin, label="Pos - Hard Neg Margin", color="orange")
+    pos_arr = np.array(history["val_pos_score"])
+    neg_arr = np.array(history["val_neg_score"])
+    hard_arr = np.array(history["val_hard_neg_score"])
+    axes[1, 2].plot(epochs, pos_arr - neg_arr, label="Pos - Neg", color="#9467bd")
+    axes[1, 2].plot(epochs, pos_arr - hard_arr, label="Pos - Hard Neg", color="#ff7f0e")
     axes[1, 2].set_xlabel("Epoch")
     axes[1, 2].set_ylabel("Score Margin")
     axes[1, 2].set_title("Score Margins")
-    axes[1, 2].grid(True)
     axes[1, 2].axhline(y=0, color="r", linestyle="--", alpha=0.3)
     axes[1, 2].legend()
+    axes[1, 2].grid(True, alpha=0.4)
 
-    # Top-3 Accuracy detail
-    axes[2, 0].plot(epochs, history["val_top3_accuracy"], label="Top-3 Accuracy", color="blue", linewidth=2)
-    axes[2, 0].fill_between(epochs, history["val_accuracy"], history["val_top3_accuracy"], 
-                            alpha=0.3, color="blue", label="Top-1 to Top-3 gain")
-    axes[2, 0].set_xlabel("Epoch")
-    axes[2, 0].set_ylabel("Accuracy")
-    axes[2, 0].set_title("Top-3 Accuracy (with Top-1 baseline)")
-    axes[2, 0].grid(True)
-    axes[2, 0].legend()
-    axes[2, 0].set_ylim([0, 1.05])
+    train_arr = np.array(history["train_loss"])
+    val_arr = np.array(history["val_loss"])
+    gap = val_arr - train_arr
+    axes[1, 3].plot(epochs, gap, color="darkorange", linewidth=2)
+    axes[1, 3].fill_between(epochs, 0, gap, alpha=0.2, color="darkorange")
+    axes[1, 3].set_xlabel("Epoch")
+    axes[1, 3].set_ylabel("Val - Train Loss")
+    axes[1, 3].set_title("Overfitting Gap")
+    axes[1, 3].axhline(y=0, color="k", linestyle="-", alpha=0.3)
+    axes[1, 3].grid(True, alpha=0.4)
 
-    # Top-5 Accuracy detail
-    axes[2, 1].plot(epochs, history["val_top5_accuracy"], label="Top-5 Accuracy", color="purple", linewidth=2)
-    axes[2, 1].fill_between(epochs, history["val_top3_accuracy"], history["val_top5_accuracy"], 
-                            alpha=0.3, color="purple", label="Top-3 to Top-5 gain")
-    axes[2, 1].set_xlabel("Epoch")
-    axes[2, 1].set_ylabel("Accuracy")
-    axes[2, 1].set_title("Top-5 Accuracy (with Top-3 baseline)")
-    axes[2, 1].grid(True)
-    axes[2, 1].legend()
-    axes[2, 1].set_ylim([0, 1.05])
-
-    # Learning rate
-    axes[2, 2].plot(epochs, history["learning_rates"], label="Learning Rate", color="orange")
-    axes[2, 2].set_xlabel("Epoch")
-    axes[2, 2].set_ylabel("Learning Rate")
-    axes[2, 2].set_title("Learning Rate Schedule")
-    axes[2, 2].grid(True)
-    axes[2, 2].legend()
-    axes[2, 2].set_yscale('log')
-
+    fig.suptitle("Training History", fontsize=16, fontweight="bold", y=1.01)
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    print(f"Saved training history plot to {save_path}")
-
-
-def plot_training_history_old(history, save_path):
-    """Plot training curves."""
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-
-    epochs = range(1, len(history["train_loss"]) + 1)
-
-    # Total Loss
-    axes[0, 0].plot(epochs, history["train_loss"], label="Train Loss")
-    axes[0, 0].plot(epochs, history["val_loss"], label="Val Loss")
-    axes[0, 0].set_xlabel("Epoch")
-    axes[0, 0].set_ylabel("Loss")
-    axes[0, 0].set_title("Total Loss (BCE + Ranking)")
-    axes[0, 0].legend()
-    axes[0, 0].grid(True)
-
-    # BCE Loss
-    axes[0, 1].plot(epochs, history["train_bce_loss"], label="Train BCE", color="blue")
-    axes[0, 1].plot(epochs, history["val_bce_loss"], label="Val BCE", color="orange")
-    axes[0, 1].set_xlabel("Epoch")
-    axes[0, 1].set_ylabel("Loss")
-    axes[0, 1].set_title("BCE Loss")
-    axes[0, 1].legend()
-    axes[0, 1].grid(True)
-
-    # Ranking Loss
-    axes[0, 2].plot(epochs, history["train_ranking_loss"], label="Train Ranking", color="green")
-    axes[0, 2].plot(epochs, history["val_ranking_loss"], label="Val Ranking", color="red")
-    axes[0, 2].set_xlabel("Epoch")
-    axes[0, 2].set_ylabel("Loss")
-    axes[0, 2].set_title("Ranking Loss")
-    axes[0, 2].legend()
-    axes[0, 2].grid(True)
-
-    # Accuracy
-    axes[1, 0].plot(
-        epochs, history["val_accuracy"], label="Val Accuracy", color="green"
-    )
-    axes[1, 0].set_xlabel("Epoch")
-    axes[1, 0].set_ylabel("Accuracy")
-    axes[1, 0].set_title("Validation Accuracy (Positive Ranked First)")
-    axes[1, 0].grid(True)
-    axes[1, 0].legend()
-
-    # Score distribution
-    axes[1, 1].plot(epochs, history["val_pos_score"], label="Avg Positive Score", color="green")
-    axes[1, 1].plot(epochs, history["val_neg_score"], label="Avg Negative Score", color="red")
-    axes[1, 1].plot(epochs, history["val_hard_neg_score"], label="Avg Hard Neg Score", color="orange")
-    axes[1, 1].set_xlabel("Epoch")
-    axes[1, 1].set_ylabel("Score")
-    axes[1, 1].set_title("Average Scores by Class")
-    axes[1, 1].legend()
-    axes[1, 1].grid(True)
-
-    # Score separation (margin)
-    margin = np.array(history["val_pos_score"]) - np.array(history["val_neg_score"])
-    hard_margin = np.array(history["val_pos_score"]) - np.array(history["val_hard_neg_score"])
-    axes[1, 2].plot(epochs, margin, label="Pos - Neg Margin", color="purple")
-    axes[1, 2].plot(epochs, hard_margin, label="Pos - Hard Neg Margin", color="orange")
-    axes[1, 2].set_xlabel("Epoch")
-    axes[1, 2].set_ylabel("Score Margin")
-    axes[1, 2].set_title("Score Margins")
-    axes[1, 2].grid(True)
-    axes[1, 2].axhline(y=0, color="r", linestyle="--", alpha=0.3)
-    axes[1, 2].legend()
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Saved training history plot to {save_path}")
 
@@ -281,9 +193,9 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
                     else:
                         all_neg_scores.append(score)
 
-    accuracy_top1 = correct_top1 / total_groups if total_groups_with_positive > 0 else 0.0
-    accuracy_top3 = correct_top3 / total_groups if total_groups_with_positive > 0 else 0.0
-    accuracy_top5 = correct_top5 / total_groups if total_groups_with_positive > 0 else 0.0
+    accuracy_top1 = correct_top1 / total_groups_with_positive if total_groups_with_positive > 0 else 0.0
+    accuracy_top3 = correct_top3 / total_groups_with_positive if total_groups_with_positive > 0 else 0.0
+    accuracy_top5 = correct_top5 / total_groups_with_positive if total_groups_with_positive > 0 else 0.0
     avg_pos_score = np.mean(all_pos_scores) if all_pos_scores else 0.0
     avg_neg_score = np.mean(all_neg_scores) if all_neg_scores else 0.0
     avg_hard_neg_score = np.mean(all_hard_neg_scores) if all_hard_neg_scores else 0.0

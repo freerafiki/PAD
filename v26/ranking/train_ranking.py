@@ -1,4 +1,5 @@
 from pathlib import Path
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -38,6 +39,11 @@ def train_model(
     temperature=1.0,
     max_norm=1.0,
     pos_weight_val_BCE=4.0,
+    start_epoch=1,
+    initial_history=None,
+    initial_best_val_acc=0.0,
+    initial_patience=0,
+    reset_scheduler=False,
 ):
     """
     Training with combined BCE + AdaptiveTopNRankingLoss and early stopping for small datasets.
@@ -80,10 +86,11 @@ def train_model(
     else:
         optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
+    remaining_epochs = num_epochs - start_epoch + 1
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=lr,
-        epochs=num_epochs,
+        epochs=remaining_epochs,
         steps_per_epoch=len(train_loader),
         pct_start=0.1,
         anneal_strategy="cos",
@@ -91,36 +98,44 @@ def train_model(
 
     model = model.to(device)
 
-    best_val_acc = 0.0
-    patience_counter = 0
+    best_val_acc = initial_best_val_acc
+    patience_counter = initial_patience
 
-    history = {
-        "train_loss": [],
-        "train_bce_loss": [],
-        "train_ranking_loss": [],
-        "train_boundary_loss": [],
-        "val_loss": [],
-        "val_bce_loss": [],
-        "val_ranking_loss": [],
-        "val_boundary_loss": [],
-        "val_accuracy": [],
-        "val_top3_accuracy": [],
-        "val_top5_accuracy": [],
-        "val_pos_score": [],
-        "val_neg_score": [],
-        "val_hard_neg_score": [],
-        "learning_rates": [],
-    }
+    if initial_history is not None:
+        history = initial_history
+    else:
+        history = {
+            "train_loss": [],
+            "train_bce_loss": [],
+            "train_ranking_loss": [],
+            "train_boundary_loss": [],
+            "val_loss": [],
+            "val_bce_loss": [],
+            "val_ranking_loss": [],
+            "val_boundary_loss": [],
+            "val_accuracy": [],
+            "val_top3_accuracy": [],
+            "val_top5_accuracy": [],
+            "val_pos_score": [],
+            "val_neg_score": [],
+            "val_hard_neg_score": [],
+            "learning_rates": [],
+        }
 
-    print(f"Training {model_name} for up to {num_epochs} epochs")
+    if start_epoch > 1:
+        print(f"Resuming {model_name} from epoch {start_epoch} (total: {num_epochs} epochs)")
+    else:
+        print(f"Training {model_name} for up to {num_epochs} epochs")
     print(f"Early stopping patience: {early_stopping_patience}")
+    if initial_best_val_acc > 0:
+        print(f"Previous best val accuracy: {initial_best_val_acc:.3f}")
     print(f"Loss: BCE*{bce_weight} + AdaptiveTopNRankingLoss*{ranking_weight} + BoundaryPairwiseCorrelationLoss*{boundary_weight}")
     print(f"  AdaptiveTopNRankingLoss: top_n={top_n}, margin={ranking_margin}, temperature={temperature}")
     print(f"Train samples: {len(train_dataset)} pairs")
     print(f"Val samples: {len(val_dataset)} pairs")
     print("-" * 60)
 
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(start_epoch, num_epochs + 1):
         model.train()
         train_loss = 0.0
         train_bce_loss = 0.0
@@ -193,9 +208,9 @@ def train_model(
                 difficulties = batch["difficulties"]
                 group_sizes = batch['group_sizes']
 
-                if hasattr(model, 'dino'):
+                if isinstance(model, MultiModalScorerV2_Practical) or isinstance(model, MultiModalScorerWeightedVit):
                     logits = model(rgb, rgb_geometric).squeeze()
-                elif hasattr(model, 'projection'):
+                elif isinstance(model, GeometricScorer):
                     logits = model(rgb_geometric).squeeze()
                 else:
                     logits = model(rgb).squeeze()
@@ -286,6 +301,11 @@ def train_model(
 
 def main():
     """Main training script."""
+    parser = argparse.ArgumentParser(description="Train ranking model")
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint to resume from')
+    args = parser.parse_args()
+
     cfg = Config()
 
     print(f"Using device: {cfg.training.DEVICE}")
@@ -334,6 +354,48 @@ def main():
         weight_decay=cfg.training.WEIGHT_DECAY,
     )
 
+    start_epoch = 1
+    initial_history = None
+    initial_best_val_acc = 0.0
+    initial_patience = 0
+
+    if args.resume:
+        print(f"\nResuming from checkpoint: {args.resume}")
+        try:
+            ckpt = torch.load(args.resume, map_location=cfg.training.DEVICE, weights_only=True)
+        except Exception:
+            ckpt = torch.load(args.resume, map_location=cfg.training.DEVICE, weights_only=False)
+
+        model.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+
+        for pg in optimizer.param_groups:
+            pg['lr'] = cfg.training.LEARNING_RATE
+
+        # Move optimizer state tensors to the correct device after loading.
+        # Adam's load_state_dict does not auto-move internal state buffers,
+        # which causes device mismatch errors on the first optimizer.step() call.
+        device = torch.device(cfg.training.DEVICE)
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
+
+        ckpt_epoch = ckpt.get('epoch', 0)
+        start_epoch = ckpt_epoch + 1
+        initial_best_val_acc = ckpt.get('val_accuracy', 0.0)
+        initial_history = ckpt.get('history', None)
+
+        hist = initial_history
+        if hist is not None and len(hist.get('val_accuracy', [])) > 0:
+            recent_accs = hist['val_accuracy'][-cfg.training.EARLY_STOPPING_PATIENCE:]
+            if all(a <= initial_best_val_acc for a in recent_accs):
+                initial_patience = len(recent_accs)
+
+        print(f"  Resuming from epoch {start_epoch}/{cfg.training.NUM_EPOCHS}")
+        print(f"  Previous best val accuracy: {initial_best_val_acc:.3f}")
+        print(f"  LR set to: {cfg.training.LEARNING_RATE}")
+
     estimate_data_needs(model, train_dataset)
 
     model, history = train_model(
@@ -346,7 +408,7 @@ def main():
         lr=cfg.training.LEARNING_RATE,
         weight_decay=cfg.training.WEIGHT_DECAY,
         early_stopping_patience=cfg.training.EARLY_STOPPING_PATIENCE,
-        model_name="multimodal_bceW_wikiart_frozen8",
+        model_name="multimodal_bceW_wikiart_frozen8_resumed",
         bce_weight=cfg.loss.BCE_WEIGHT,
         ranking_weight=cfg.loss.RANKING_WEIGHT,
         boundary_weight=cfg.loss.BOUNDARY_WEIGHT,
@@ -356,6 +418,10 @@ def main():
         temperature=cfg.loss.TEMPERATURE,
         max_norm=cfg.training.GRAD_CLIP_MAX_NORM,
         pos_weight_val_BCE=cfg.training.BCE_POS_WEIGHT,
+        start_epoch=start_epoch,
+        initial_history=initial_history,
+        initial_best_val_acc=initial_best_val_acc,
+        initial_patience=initial_patience,
     )
 
     diagnose_data_sufficiency(history)

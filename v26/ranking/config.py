@@ -41,9 +41,9 @@ class TrainingConfig:
 
 @dataclass
 class LossConfig:
-    BCE_WEIGHT: float = 0.15
-    RANKING_WEIGHT: float = 0.55
-    BOUNDARY_WEIGHT: float = 0.3
+    BCE_WEIGHT: float = 0.4
+    RANKING_WEIGHT: float = 0.4
+    BOUNDARY_WEIGHT: float = 0.2
     RANKING_MARGIN: float = 0.3
     HARD_NEGATIVE_WEIGHT: float = 2.0
     TOP_N: int = 3
