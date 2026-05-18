@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class DataConfig:
-    DATA_ROOT: str = "/media/lucap/big_data/datasets/wikiart_PAD/PAD_dataset__Wikiart"
+    DATA_ROOT: str = "/media/lucap/big_data/datasets/wikiart_PAD/PAD_dataset__Wikiart_nn"
     MAX_NEGATIVES_PER_POSITIVE: int = 12
     TRAIN_RATIO: float = 0.8
     SEED: int = 42
@@ -20,11 +20,15 @@ class DataConfig:
 
 @dataclass
 class ModelConfig:
-    DINO_MODEL: str = "facebook/dinov2-base"
+    # DINO_MODEL: str = "facebook/dinov2-base"
+    DINO_MODEL: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
     VIT_MODEL: str = "google/vit-base-patch16-224"
     FROZEN_LAYERS: int = 8
     DROPOUT: float = 0.5
     GEOMETRIC_CHANNEL_SCALE: float = 1.0  # Multiplier for channels 3-5 of rgb_geometric
+    FILM_ENABLED: bool = False
+    FILM_T_DIM: int = 64
+    FILM_LAYERS: tuple = (8, 9, 10, 11)
 
 
 @dataclass
@@ -51,8 +55,30 @@ class LossConfig:
 
 
 @dataclass
+class AugmentationConfig:
+    ENABLED: bool = False
+    COLOR_JITTER: bool = True
+    COLOR_JITTER_BRIGHTNESS: float = 0.2
+    COLOR_JITTER_CONTRAST: float = 0.2
+    COLOR_JITTER_SATURATION: float = 0.2
+    COLOR_JITTER_HUE: float = 0.1
+    GAUSSIAN_BLUR: bool = True
+    GAUSSIAN_BLUR_KERNEL_SIZE: int = 3
+    GAUSSIAN_BLUR_PROB: float = 0.2
+    RANDOM_GRAYSCALE: bool = True
+    RANDOM_GRAYSCALE_PROB: float = 0.05
+    HORIZONTAL_FLIP: bool = True
+    HORIZONTAL_FLIP_PROB: float = 0.5
+    VERTICAL_FLIP: bool = False
+    VERTICAL_FLIP_PROB: float = 0.5
+    ROTATION_90: bool = True
+    ROTATION_90_PROB: float = 0.3
+
+
+@dataclass
 class Config:
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     loss: LossConfig = field(default_factory=LossConfig)
+    augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)

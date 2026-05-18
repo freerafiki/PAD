@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import Dinov2Model, ViTModel
+# from transformers import Dinov2Model, ViTModel
+from transformers import DINOv3ViTModel as Dinov2Model, ViTModel
 
 """
 Because of the fact that we compute a combination of losses 
@@ -83,7 +84,7 @@ class MultiModalScorer(nn.Module):
     def __init__(
         self,
         geometric_vit="google/vit-base-patch16-224",
-        dino_model="facebook/dinov2-base",
+        dino_model="facebook/dinov3-vitb16-pretrain-lvd1689m",
         geometric_channel_scale=1.0,
     ):
         super().__init__()
@@ -168,7 +169,7 @@ class MultiModalScorerV2(nn.Module):
     def __init__(
         self,
         geometric_vit="google/vit-base-patch16-224",
-        dino_model="facebook/dinov2-base",
+        dino_model="facebook/dinov3-vitb16-pretrain-lvd1689m",
         use_cross_attention=False,
         dropout=0.2,
         geometric_channel_scale=1.0,
@@ -573,6 +574,95 @@ class MultiModalScorerWeightedVit(nn.Module):
         # Contact-weighted pooling of patch tokens
         contact_mask = rgb_geometric[:, 5]  # (B, H, W)
         contact_pooled = self._contact_weighted_pool(vit_output.last_hidden_state, contact_mask)
+
+        with torch.no_grad():
+            dino_feats = self.dino(rgb).pooler_output
+
+        combined = torch.cat([cls_feats, contact_pooled, dino_feats], dim=1)
+        logits = self.fusion(combined)
+
+        return logits
+
+
+class FiLMViTBlock(nn.Module):
+    """Wraps a single ViT block with FiLM conditioning."""
+    def __init__(self, vit_block, t_dim=64, hidden_dim=768):
+        super().__init__()
+        self.block = vit_block
+        self.film_mlp = nn.Sequential(
+            nn.Linear(t_dim, 256),
+            nn.GELU(),
+            nn.Linear(256, hidden_dim * 2)
+        )
+
+    def forward(self, hidden_states, t_emb=None, head_mask=None, output_attentions=False):
+        out = self.block(hidden_states, head_mask=head_mask, output_attentions=output_attentions)
+        x = out[0]
+
+        if t_emb is not None:
+            gamma, beta = self.film_mlp(t_emb).chunk(2, dim=-1)
+            x = gamma.unsqueeze(1) * x + beta.unsqueeze(1)
+
+        return (x,) + out[1:]
+
+
+class MultiModalScorerWeightedViTFiLM(MultiModalScorerWeightedVit):
+    """
+    Multi-modal scorer with FiLM conditioning + contact-weighted pooling.
+
+    Architecture:
+        rgb_geometric → geometric_encoder → rgb_geom_fusion
+            → FiLMViT ─┬→ CLS token
+                        └→ patch tokens → contact-weighted pooling
+                                                   ↓
+        rgb → DINO → concat → fusion → score
+
+    FiLM conditioning vector is computed by global average pooling of the
+    geometric channels (proximity_A, proximity_B, contact) and projecting to t_dim.
+    This tells each FiLM-wrapped ViT block what alignment configuration to expect,
+    allowing dynamic modulation of self-attention and FFN computations.
+    """
+
+    def __init__(self, t_dim=64, film_layers=(8, 9, 10, 11), **kwargs):
+        super().__init__(**kwargs)
+        self.t_dim = t_dim
+        self.film_layers = film_layers
+
+        self.t_emb_proj = nn.Sequential(
+            nn.Linear(3, t_dim),
+            nn.GELU(),
+        )
+
+        for i in film_layers:
+            self.geometric_vit.encoder.layer[i] = FiLMViTBlock(
+                self.geometric_vit.encoder.layer[i], t_dim
+            )
+
+        trainable_film = sum(p.numel() for p in self.t_emb_proj.parameters())
+        for i in film_layers:
+            trainable_film += sum(p.numel() for p in self.geometric_vit.encoder.layer[i].film_mlp.parameters())
+        print(f"FiLM: wrapped layers {film_layers}, t_dim={t_dim}, +{trainable_film:,} params")
+
+    def forward(self, rgb, rgb_geometric):
+        rgb_only = rgb_geometric[:, :3]
+        geom_only = rgb_geometric[:, 3:] * self.geometric_channel_scale
+        geom_encoded = self.geometric_encoder(geom_only)
+        combined_input = torch.cat([rgb_only, geom_encoded], dim=1)
+        vit_input = self.rgb_geom_fusion(combined_input)
+
+        geom_pooled = rgb_geometric[:, 3:].mean(dim=[2, 3])  # (B, 3)
+        t_emb = self.t_emb_proj(geom_pooled)                  # (B, t_dim)
+
+        x = self.geometric_vit.embeddings(vit_input)
+        for block in self.geometric_vit.encoder.layer:
+            if isinstance(block, FiLMViTBlock):
+                x = block(x, t_emb)[0]
+            else:
+                x = block(x)[0]
+        x = self.geometric_vit.layernorm(x)  # (B, 197, 768)
+
+        cls_feats = x[:, 0, :]
+        contact_pooled = self._contact_weighted_pool(x, rgb_geometric[:, 5])
 
         with torch.no_grad():
             dino_feats = self.dino(rgb).pooler_output

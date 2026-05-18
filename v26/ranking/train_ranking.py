@@ -11,7 +11,7 @@ from dataset_ranking import (
     ShuffledBatchSampler,
     collate_alignment_samples,
 )
-from models_ranking import MultiModalScorerV2_Practical, MultiModalScorerWeightedVit, GeometricScorer, BaselineScorer
+from models_ranking import MultiModalScorerV2_Practical, MultiModalScorerWeightedVit, MultiModalScorerWeightedViTFiLM, GeometricScorer, BaselineScorer
 from loss_ranking import AdaptiveTopNRankingLoss, BoundaryPairwiseCorrelationLoss, BoundaryPseudoRankingLoss
 from training_utils import evaluate_ranking, estimate_data_needs, diagnose_data_sufficiency, plot_training_history, plot_new_accuracy_metrics
 from config import Config
@@ -316,6 +316,10 @@ def main():
     parser = argparse.ArgumentParser(description="Train ranking model")
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
+    parser.add_argument('--save-split', type=str, default=None,
+                        help='Create and save a 3-way puzzle split to JSON file')
+    parser.add_argument('--load-split', type=str, default=None,
+                        help='Load a pre-saved puzzle split from JSON file')
     args = parser.parse_args()
 
     cfg = Config()
@@ -330,10 +334,32 @@ def main():
         debug_mode=cfg.data.DEBUG,
     )
 
-    train_dataset, val_dataset = PrecomposedAlignmentDataset.create_puzzle_split(
-        full_dataset, radius=cfg.data.RADIUS, threshold=cfg.data.THRESHOLD,
-        train_ratio=cfg.data.TRAIN_RATIO, seed=cfg.data.SEED,
-    )
+    if args.load_split:
+        # Load pre-saved split
+        train_dataset, val_dataset, _ = PrecomposedAlignmentDataset.from_split_file(
+            args.load_split,
+            max_negatives_per_positive=cfg.data.MAX_NEGATIVES_PER_POSITIVE,
+            hard_negative_ratio=0.5,
+            radius=cfg.data.RADIUS,
+            threshold=cfg.data.THRESHOLD,
+            debug_mode=cfg.data.DEBUG,
+        )
+    else:
+        # Create split on the fly
+        train_dataset, val_dataset = PrecomposedAlignmentDataset.create_puzzle_split(
+            full_dataset, radius=cfg.data.RADIUS, threshold=cfg.data.THRESHOLD,
+            train_ratio=cfg.data.TRAIN_RATIO, seed=cfg.data.SEED,
+        )
+
+    # Enable augmentation only on training set
+    if cfg.augmentation.ENABLED:
+        train_dataset = full_dataset.create_split(
+            train_puzzles=set(k.split("|")[0] for k in train_dataset.pair_keys),
+            augment=True, augment_cfg=cfg.augmentation,
+        )
+
+    if args.save_split:
+        full_dataset.save_split(args.save_split)
 
     print(f"\n=== Dataset Ready ===")
     print(f"Train: {len(train_dataset)} pairs")
@@ -349,16 +375,30 @@ def main():
         print("No puzzle overlap between train and val")
 
     print("\n" + "=" * 60)
-    print("TRAINING MODEL: RGB + Geometry + DINO (with geometric channel scaling)")
+    if cfg.model.FILM_ENABLED:
+        print("TRAINING MODEL: RGB + Geometry + DINO + FiLM (with contact-weighted pooling)")
+    else:
+        print("TRAINING MODEL: RGB + Geometry + DINO (with geometric channel scaling)")
     print("=" * 60)
 
-    model = MultiModalScorerV2_Practical(
-        dino_model=cfg.model.DINO_MODEL,
-        geometric_vit=cfg.model.VIT_MODEL,
-        freeze_vit_layers=cfg.model.FROZEN_LAYERS,
-        dropout=cfg.model.DROPOUT,
-        geometric_channel_scale=cfg.model.GEOMETRIC_CHANNEL_SCALE,
-    )
+    if cfg.model.FILM_ENABLED:
+        model = MultiModalScorerWeightedViTFiLM(
+            dino_model=cfg.model.DINO_MODEL,
+            geometric_vit=cfg.model.VIT_MODEL,
+            freeze_vit_layers=cfg.model.FROZEN_LAYERS,
+            dropout=cfg.model.DROPOUT,
+            geometric_channel_scale=cfg.model.GEOMETRIC_CHANNEL_SCALE,
+            t_dim=cfg.model.FILM_T_DIM,
+            film_layers=cfg.model.FILM_LAYERS,
+        )
+    else:
+        model = MultiModalScorerV2_Practical(
+            dino_model=cfg.model.DINO_MODEL,
+            geometric_vit=cfg.model.VIT_MODEL,
+            freeze_vit_layers=cfg.model.FROZEN_LAYERS,
+            dropout=cfg.model.DROPOUT,
+            geometric_channel_scale=cfg.model.GEOMETRIC_CHANNEL_SCALE,
+        )
 
     optimizer = optim.AdamW(
         model.parameters(),

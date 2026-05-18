@@ -18,10 +18,11 @@ from dataset_ranking import (
     PrecomposedAlignmentDataset,
     collate_alignment_samples,
 )
-from models_ranking import (  # MultiModalScorer #MultiModalScorerV2_Practical
+from models_ranking import (
     BaselineScorer,
     GeometricScorer,
     MultiModalScorerV2_Practical,
+    MultiModalScorerWeightedViTFiLM,
 )
 from PIL import Image
 from sklearn.decomposition import PCA
@@ -39,7 +40,9 @@ def load_model(checkpoint_path, model_type, device="cuda"):
     elif model_type == "geometric":
         model = GeometricScorer()
     elif model_type == "multimodal":
-        model = MultiModalScorerV2_Practical()  # MultiModalScorerV2_Practical()
+        model = MultiModalScorerV2_Practical()
+    elif model_type == "film":
+        model = MultiModalScorerWeightedViTFiLM()
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -107,12 +110,13 @@ def extract_attention_maps(model, rgb, rgb_geometric, model_type="geometric"):
     """
     model.eval()
 
-    # Determine which ViT to use
     if model_type == "baseline":
         vit_model = model.vit
     elif model_type == "geometric":
         vit_model = model.vit
     elif model_type == "multimodal":
+        vit_model = model.geometric_vit
+    elif model_type == "film":
         vit_model = model.geometric_vit
     else:
         raise ValueError(f"Unknown model type: {model_type}")
@@ -328,7 +332,7 @@ def visualize_batch(
     with torch.no_grad():
         if model_type == "baseline":
             scores = torch.sigmoid(model(rgb)).squeeze()
-        elif model_type == "multimodal":
+        elif model_type in ("multimodal", "film"):
             scores = torch.sigmoid(model(rgb, rgb_geometric)).squeeze()
         else:
             scores = torch.sigmoid(model(rgb_geometric)).squeeze()
@@ -913,7 +917,7 @@ if __name__ == "__main__":
         "--model_type",
         type=str,
         required=True,
-        choices=["baseline", "geometric", "multimodal"],
+        choices=["baseline", "geometric", "multimodal", "film"],
         help="Type of model",
     )
     parser.add_argument("--data_root", type=str, default="./data", help="Path to data")

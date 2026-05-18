@@ -18,7 +18,9 @@ from PIL import Image
 from pathlib import Path
 from scipy.ndimage import distance_transform_edt
 import torchvision.transforms as transforms
+import torchvision.transforms.functional as TF
 import re
+import json
 from torch.utils.data import Sampler
 
 # ============================================================================
@@ -301,7 +303,9 @@ class PrecomposedAlignmentDataset(Dataset):
                  radius=20,
                  threshold=15,
                  transform=None,
-                 debug_mode=False):
+                 debug_mode=False,
+                 augment=False,
+                 augment_cfg=None):
         """
         Args:
             data_root: Path to data directory with positive/negative/hard_negative/non_neighbour folders
@@ -313,6 +317,8 @@ class PrecomposedAlignmentDataset(Dataset):
             include_non_neighbours: If True, include non-neighbour pairs in training
             non_neighbour_ratio: Fraction of batches that should be non-neighbour (0.0-1.0)
             debug_mode: If True, limit dataset to 1000 images per category for fast testing
+            augment: If True, apply data augmentation (requires augment_cfg)
+            augment_cfg: AugmentationConfig object with transform parameters
         """
         self.data_root = Path(data_root)
         self.max_negatives_per_positive = max_negatives_per_positive
@@ -320,6 +326,8 @@ class PrecomposedAlignmentDataset(Dataset):
         self.radius = radius
         self.threshold = threshold
         self.debug_mode = debug_mode
+        self.augment = augment
+        self.augment_cfg = augment_cfg
 
         self.transform = transform or transforms.Compose([
             transforms.Resize((224, 224)),
@@ -327,6 +335,27 @@ class PrecomposedAlignmentDataset(Dataset):
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                std=[0.229, 0.224, 0.225])
         ])
+
+        # Pre-build color augmentation pipeline (RGB-only transforms)
+        self.color_augment = None
+        if self.augment and self.augment_cfg is not None:
+            aug_list = []
+            cfg = self.augment_cfg
+            if cfg.COLOR_JITTER:
+                aug_list.append(transforms.ColorJitter(
+                    cfg.COLOR_JITTER_BRIGHTNESS,
+                    cfg.COLOR_JITTER_CONTRAST,
+                    cfg.COLOR_JITTER_SATURATION,
+                    cfg.COLOR_JITTER_HUE,
+                ))
+            if cfg.GAUSSIAN_BLUR:
+                aug_list.append(transforms.RandomApply(
+                    [transforms.GaussianBlur(cfg.GAUSSIAN_BLUR_KERNEL_SIZE)],
+                    p=cfg.GAUSSIAN_BLUR_PROB,
+                ))
+            if cfg.RANDOM_GRAYSCALE:
+                aug_list.append(transforms.RandomGrayscale(p=cfg.RANDOM_GRAYSCALE_PROB))
+            self.color_augment = transforms.Compose(aug_list) if aug_list else None
 
         # Group files by piece pairs
         print("Loading and grouping files by piece pairs...")
@@ -855,6 +884,10 @@ class PrecomposedAlignmentDataset(Dataset):
         rgb_resized = rgb_image.resize((224, 224), Image.BILINEAR)
         geometric_resized = self._resize_geometric_features(geometric_features, (224, 224))
 
+        # Apply augmentation to BOTH rgb and geometric after resize
+        if self.augment and self.augment_cfg is not None and self.augment_cfg.ENABLED:
+            rgb_resized, geometric_resized = self._apply_augmentation(rgb_resized, geometric_resized)
+
         # Apply transforms to RGB
         rgb_tensor = self.transform(rgb_resized)
 
@@ -865,6 +898,47 @@ class PrecomposedAlignmentDataset(Dataset):
         rgb_geometric = torch.cat([rgb_tensor, geometric_tensor], dim=0)
 
         return rgb_tensor, rgb_geometric
+
+    def _apply_augmentation(self, rgb_pil, geometric_np):
+        """
+        Apply data augmentation consistently to RGB and geometric features.
+
+        Spatial transforms (flip, rotate) are applied to BOTH.
+        Color transforms are applied to RGB only.
+
+        Args:
+            rgb_pil: PIL Image (224, 224) RGB
+            geometric_np: numpy array (3, 224, 224) geometric features
+
+        Returns:
+            rgb_pil: Augmented PIL Image
+            geometric_np: Augmented numpy array
+        """
+        cfg = self.augment_cfg
+
+        # === Spatial transforms (applied identically to BOTH) ===
+
+        # Horizontal flip
+        if cfg.HORIZONTAL_FLIP and np.random.rand() < cfg.HORIZONTAL_FLIP_PROB:
+            rgb_pil = TF.hflip(rgb_pil)
+            geometric_np = geometric_np[:, :, ::-1].copy()
+
+        # Vertical flip
+        if cfg.VERTICAL_FLIP and np.random.rand() < cfg.VERTICAL_FLIP_PROB:
+            rgb_pil = TF.vflip(rgb_pil)
+            geometric_np = geometric_np[:, ::-1, :].copy()
+
+        # Rotation by multiples of 90°
+        if cfg.ROTATION_90 and np.random.rand() < cfg.ROTATION_90_PROB:
+            k = np.random.randint(1, 4)  # 1, 2, or 3 → 90°, 180°, 270°
+            rgb_pil = TF.rotate(rgb_pil, k * 90, expand=False, fill=0)
+            geometric_np = np.rot90(geometric_np, k=k, axes=(1, 2)).copy()
+
+        # === Color transforms (RGB only) ===
+        if self.color_augment is not None:
+            rgb_pil = self.color_augment(rgb_pil)
+
+        return rgb_pil, geometric_np
 
     def _create_geometric_features(self, mask_array):
         """
@@ -1023,13 +1097,16 @@ class PrecomposedAlignmentDataset(Dataset):
 
         return np.stack(resized_channels, axis=0)
 
-    def create_split(self, train_puzzles=None, val_puzzles=None, radius=30, threshold=30):
+    def create_split(self, train_puzzles=None, val_puzzles=None, radius=30, threshold=30,
+                     augment=None, augment_cfg=None):
         """
         Create a filtered dataset for train or validation.
 
         Args:
             train_puzzles: Set of puzzle IDs for training
             val_puzzles: Set of puzzle IDs for validation
+            augment: Override augmentation (if None, inherits from this dataset)
+            augment_cfg: Augmentation config (if None, inherits from this dataset)
 
         Returns:
             New dataset instance with filtered pairs
@@ -1051,6 +1128,28 @@ class PrecomposedAlignmentDataset(Dataset):
             if key.split('|')[0] in keep_puzzles
         ]
         
+        # Determine augment settings (override vs inherit)
+        use_augment = augment if augment is not None else self.augment
+        use_augment_cfg = augment_cfg if augment_cfg is not None else self.augment_cfg
+
+        # Pre-build color augmentation pipeline if needed
+        color_augment = None
+        if use_augment and use_augment_cfg is not None:
+            aug_list = []
+            cfg = use_augment_cfg
+            if cfg.COLOR_JITTER:
+                aug_list.append(transforms.ColorJitter(
+                    cfg.COLOR_JITTER_BRIGHTNESS, cfg.COLOR_JITTER_CONTRAST,
+                    cfg.COLOR_JITTER_SATURATION, cfg.COLOR_JITTER_HUE,
+                ))
+            if cfg.GAUSSIAN_BLUR:
+                aug_list.append(transforms.RandomApply(
+                    [transforms.GaussianBlur(cfg.GAUSSIAN_BLUR_KERNEL_SIZE)],
+                    p=cfg.GAUSSIAN_BLUR_PROB,
+                ))
+            if cfg.RANDOM_GRAYSCALE:
+                aug_list.append(transforms.RandomGrayscale(p=cfg.RANDOM_GRAYSCALE_PROB))
+            color_augment = transforms.Compose(aug_list) if aug_list else None
 
         # Create new instance (shallow copy)
         new_dataset = PrecomposedAlignmentDataset.__new__(PrecomposedAlignmentDataset)
@@ -1060,20 +1159,27 @@ class PrecomposedAlignmentDataset(Dataset):
         new_dataset.transform = self.transform
         new_dataset.pairs = self.pairs  # Share the pairs dict (read-only)
         new_dataset.pair_keys = filtered_keys
-        new_dataset.non_neighbour_pairs = self.non_neighbour_pairs  # Share non-neighbour pairs
-        new_dataset.neighbour_pairs = self.neighbour_pairs  # Share non-neighbour pairs
+        new_dataset.non_neighbour_pairs = self.non_neighbour_pairs
+        new_dataset.neighbour_pairs = self.neighbour_pairs
         new_dataset.radius = radius
         new_dataset.threshold = threshold
         new_dataset.non_neighbour_ratio = self.non_neighbour_pairs / len(self.pairs)
+        new_dataset.augment = use_augment
+        new_dataset.augment_cfg = use_augment_cfg
+        new_dataset.color_augment = color_augment
+        new_dataset._non_neighbour_indices = self._non_neighbour_indices
 
         print(f"Created {split_name} split: {len(filtered_keys)} pairs from {len(keep_puzzles)} puzzles")
         print(f"  Non-neighbour pairs: {self.non_neighbour_pairs}")
         print(f"  Neighbour pairs: {self.neighbour_pairs}")
+        if new_dataset.augment and new_dataset.augment_cfg is not None and new_dataset.augment_cfg.ENABLED:
+            print(f"  Augmentation: ENABLED")
 
         return new_dataset
 
     @staticmethod
-    def create_puzzle_split(dataset, train_ratio=0.8, seed=42, radius=30, threshold=30):
+    def create_puzzle_split(dataset, train_ratio=0.8, seed=42, radius=30, threshold=30,
+                            val_ratio=None, test_ratio=None):
         """
         Split dataset by puzzles (no puzzle appears in both train and val).
 
@@ -1081,9 +1187,11 @@ class PrecomposedAlignmentDataset(Dataset):
             dataset: The full dataset
             train_ratio: Fraction of puzzles for training
             seed: Random seed for reproducibility
+            val_ratio: Fraction for validation (if None, remaining goes to val)
+            test_ratio: Fraction for test (optional 3-way split)
 
         Returns:
-            train_dataset, val_dataset
+            train_dataset, val_dataset  or  train_dataset, val_dataset, test_dataset
         """
         # Get all unique puzzles
         all_puzzles = list(set(key.split('|')[0] for key in dataset.pair_keys))
@@ -1093,21 +1201,141 @@ class PrecomposedAlignmentDataset(Dataset):
         np.random.seed(seed)
         np.random.shuffle(all_puzzles)
 
-        # Split
-        split_idx = int(len(all_puzzles) * train_ratio)
-        train_puzzles = set(all_puzzles[:split_idx])
-        val_puzzles = set(all_puzzles[split_idx:])
+        n = len(all_puzzles)
+        n_train = int(n * train_ratio)
 
         print(f"\n=== Puzzle-Based Split ===")
-        print(f"Total puzzles: {len(all_puzzles)}")
-        print(f"Train puzzles: {len(train_puzzles)}")
-        print(f"Val puzzles: {len(val_puzzles)}")
+        print(f"Total puzzles: {n}")
 
-        # Create split datasets
-        train_dataset = dataset.create_split(train_puzzles=train_puzzles, radius=radius, threshold=threshold)
-        val_dataset = dataset.create_split(val_puzzles=val_puzzles, radius=radius, threshold=threshold)
+        if val_ratio is not None and test_ratio is not None:
+            # 3-way split
+            n_val = int(n * val_ratio)
+            train_puzzles = set(all_puzzles[:n_train])
+            val_puzzles = set(all_puzzles[n_train:n_train + n_val])
+            test_puzzles = set(all_puzzles[n_train + n_val:])
 
-        return train_dataset, val_dataset
+            print(f"Train puzzles: {len(train_puzzles)} ({train_ratio:.1%})")
+            print(f"Val puzzles: {len(val_puzzles)} ({val_ratio:.1%})")
+            print(f"Test puzzles: {len(test_puzzles)} ({test_ratio:.1%})")
+
+            train_dataset = dataset.create_split(train_puzzles=train_puzzles, radius=radius, threshold=threshold)
+            val_dataset = dataset.create_split(val_puzzles=val_puzzles, radius=radius, threshold=threshold)
+            test_dataset = dataset.create_split(val_puzzles=test_puzzles, radius=radius, threshold=threshold)
+
+            return train_dataset, val_dataset, test_dataset
+        else:
+            # 2-way split (backwards compatible)
+            train_puzzles = set(all_puzzles[:n_train])
+            val_puzzles = set(all_puzzles[n_train:])
+
+            print(f"Train puzzles: {len(train_puzzles)} ({train_ratio:.1%})")
+            print(f"Val puzzles: {len(val_puzzles)} ({1 - train_ratio:.1%})")
+
+            train_dataset = dataset.create_split(train_puzzles=train_puzzles, radius=radius, threshold=threshold)
+            val_dataset = dataset.create_split(val_puzzles=val_puzzles, radius=radius, threshold=threshold)
+
+            return train_dataset, val_dataset
+
+    def save_split(self, path, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
+        """
+        Create a 3-way puzzle split and save puzzle IDs to JSON.
+
+        The saved JSON can be loaded later with from_split_file() for
+        reproducible dataset splits across experiments.
+
+        Args:
+            path: Path to save the JSON file
+            train_ratio: Fraction of puzzles for training
+            val_ratio: Fraction of puzzles for validation
+            test_ratio: Fraction of puzzles for testing
+            seed: Random seed for reproducibility
+        """
+        all_puzzles = list(set(key.split('|')[0] for key in self.pair_keys))
+        all_puzzles.sort()
+        np.random.seed(seed)
+        np.random.shuffle(all_puzzles)
+
+        n = len(all_puzzles)
+        n_train = int(n * train_ratio)
+        n_val = int(n * val_ratio)
+
+        split = {
+            'train': all_puzzles[:n_train],
+            'val': all_puzzles[n_train:n_train + n_val],
+            'test': all_puzzles[n_train + n_val:],
+            'params': {
+                'train_ratio': train_ratio,
+                'val_ratio': val_ratio,
+                'test_ratio': test_ratio,
+                'seed': seed,
+                'data_root': str(self.data_root),
+                'max_negatives_per_positive': self.max_negatives_per_positive,
+                'hard_negative_ratio': self.hard_negative_ratio,
+                'radius': self.radius,
+                'threshold': self.threshold,
+            }
+        }
+
+        with open(path, 'w') as f:
+            json.dump(split, f, indent=2)
+        print(f"Split saved to {path}  ({len(split['train'])} train / {len(split['val'])} val / {len(split['test'])} test)")
+
+    @staticmethod
+    def from_split_file(split_path, data_root=None, max_negatives_per_positive=4,
+                         hard_negative_ratio=0.5, radius=20, threshold=15,
+                         transform=None, debug_mode=False):
+        """
+        Load a saved split from JSON and create train/val/test datasets.
+
+        Args:
+            split_path: Path to the JSON split file (created by save_split)
+            data_root: Override data_root (uses the one from split file if None)
+            max_negatives_per_positive: Override if needed
+            hard_negative_ratio: Override if needed
+            radius: Override if needed
+            threshold: Override if needed
+            transform: Optional transform (uses default if None)
+            debug_mode: If True, limit dataset
+
+        Returns:
+            train_dataset, val_dataset, test_dataset
+        """
+        with open(split_path) as f:
+            split = json.load(f)
+
+        params = split['params']
+        root = Path(data_root or params['data_root'])
+        max_neg = max_negatives_per_positive or params['max_negatives_per_positive']
+        hn_ratio = hard_negative_ratio or params['hard_negative_ratio']
+        rad = radius or params['radius']
+        thr = threshold or params['threshold']
+
+        # Create a temporary full dataset to use create_split
+        temp_dataset = PrecomposedAlignmentDataset.__new__(PrecomposedAlignmentDataset)
+        full_dataset = PrecomposedAlignmentDataset(
+            data_root=root,
+            max_negatives_per_positive=max_neg,
+            hard_negative_ratio=hn_ratio,
+            radius=rad,
+            threshold=thr,
+            transform=transform,
+            debug_mode=debug_mode,
+        )
+
+        train_dataset = full_dataset.create_split(
+            train_puzzles=set(split['train']), radius=rad, threshold=thr
+        )
+        val_dataset = full_dataset.create_split(
+            val_puzzles=set(split['val']), radius=rad, threshold=thr
+        )
+        test_dataset = full_dataset.create_split(
+            val_puzzles=set(split['test']), radius=rad, threshold=thr
+        )
+
+        print(f"\nLoaded split from {split_path}")
+        print(f"  Train: {len(train_dataset)} pairs  Val: {len(val_dataset)} pairs  Test: {len(test_dataset)} pairs")
+
+        return train_dataset, val_dataset, test_dataset
 
 
 # ============================================================================
