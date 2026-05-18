@@ -13,7 +13,7 @@ from dataset_ranking import (
 )
 from models_ranking import MultiModalScorerV2_Practical, MultiModalScorerWeightedVit, GeometricScorer, BaselineScorer
 from loss_ranking import AdaptiveTopNRankingLoss, BoundaryPairwiseCorrelationLoss, BoundaryPseudoRankingLoss
-from training_utils import evaluate_ranking, estimate_data_needs, diagnose_data_sufficiency, plot_training_history
+from training_utils import evaluate_ranking, estimate_data_needs, diagnose_data_sufficiency, plot_training_history, plot_new_accuracy_metrics
 from config import Config
 
 
@@ -119,6 +119,11 @@ def train_model(
             "val_pos_score": [],
             "val_neg_score": [],
             "val_hard_neg_score": [],
+            "val_single_align_accuracy": [],
+            "val_single_pos_accuracy": [],
+            "val_single_neg_accuracy": [],
+            "val_single_hard_neg_accuracy": [],
+            "val_align_set_score": [],
             "learning_rates": [],
         }
 
@@ -239,7 +244,7 @@ def train_model(
             model_type = "geometric"
         else:
             model_type = "baseline"
-        val_acc, val_top3_acc, val_top5_acc, avg_pos, avg_neg, avg_hard_neg = evaluate_ranking(
+        val_acc, val_top3_acc, val_top5_acc, avg_pos, avg_neg, avg_hard_neg, single_align_acc, single_pos_acc, single_neg_acc, single_hard_neg_acc, align_set_acc, align_set_breakdown = evaluate_ranking(
             model, val_loader, device, model_type=model_type
         )
 
@@ -257,14 +262,20 @@ def train_model(
         history["val_pos_score"].append(avg_pos)
         history["val_neg_score"].append(avg_neg)
         history["val_hard_neg_score"].append(avg_hard_neg)
+        history["val_single_align_accuracy"].append(single_align_acc)
+        history["val_single_pos_accuracy"].append(single_pos_acc)
+        history["val_single_neg_accuracy"].append(single_neg_acc)
+        history["val_single_hard_neg_accuracy"].append(single_hard_neg_acc)
+        history["val_align_set_score"].append(align_set_acc)
         history["learning_rates"].append(scheduler.get_last_lr()[0])
 
         print(
             f"Epoch {epoch:3d}/{num_epochs} | "
             f"Train Loss: {avg_train_loss:.4f} (BCE: {avg_train_bce:.4f}, Rank: {avg_train_ranking:.4f}, Boundary: {avg_train_boundary:.4f}) | "
             f"Val Loss: {avg_val_loss:.4f} | "
-            f"Val Acc: {val_acc:.3f} (Top3: {val_top3_acc:.3f}, Top5: {val_top5_acc:.3f}) | "
-            f"Pos/Neg/Hard: {avg_pos:.3f}/{avg_neg:.3f}/{avg_hard_neg:.3f} | "
+            f"Ranking Acc: {val_acc:.3f} (Top3: {val_top3_acc:.3f}, Top5: {val_top5_acc:.3f}) | "
+            f"Single Align: {single_align_acc:.3f} (Pos: {single_pos_acc:.3f}, Neg: {single_neg_acc:.3f}) | "
+            f"Align Set: {align_set_acc:.3f} | "
             f"LR: {scheduler.get_last_lr()[0]:.6f}"
         )
 
@@ -295,6 +306,7 @@ def train_model(
     print(f"Training complete! Best validation accuracy: {best_val_acc:.3f}")
 
     plot_training_history(history, save_dir / f"{model_name}_history.png")
+    plot_new_accuracy_metrics(history, save_dir / f"{model_name}_new_accuracy_metrics.png")
 
     return model, history
 

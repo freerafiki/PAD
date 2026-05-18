@@ -97,6 +97,129 @@ def plot_training_history(history, save_path):
     print(f"Saved training history plot to {save_path}")
 
 
+def plot_new_accuracy_metrics(history, save_path):
+    """
+    Plot the three new accuracy metrics introduced in v26.
+
+    Panel 1: Alignment ranking accuracy (Top-1, Top-3, Top-5)
+    Panel 2: Single-alignment classification accuracy (all / positive / negative / hard-negative)
+    Panel 3: Alignment set classification score (with partial credit breakdown)
+    Panel 4: Score calibration — average scores by class
+
+    Compatible with checkpoints from before these metrics were added
+    (uses .get() with defaults).
+    """
+    if len(history.get("train_loss", [])) == 0:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.text(0.5, 0.5, "No training history available", ha="center", va="center", transform=ax.transAxes)
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved new accuracy metrics plot to {save_path}")
+        return
+
+    epochs = range(1, len(history["train_loss"]) + 1)
+    fig, axes = plt.subplots(2, 4, figsize=(24, 10))
+
+    axes[0, 0].plot(epochs, history.get("val_accuracy", []), label="Top-1", color="#2ca02c", linewidth=2)
+    axes[0, 0].plot(epochs, history.get("val_top3_accuracy", []), label="Top-3", color="#1f77b4", linewidth=2)
+    axes[0, 0].plot(epochs, history.get("val_top5_accuracy", []), label="Top-5", color="#9467bd", linewidth=2)
+    axes[0, 0].set_xlabel("Epoch")
+    axes[0, 0].set_ylabel("Accuracy")
+    axes[0, 0].set_title("Alignment Ranking Accuracy")
+    axes[0, 0].set_ylim([0, 1.05])
+    axes[0, 0].legend(loc="lower right")
+    axes[0, 0].grid(True, alpha=0.4)
+
+    axes[0, 1].plot(epochs, history.get("val_single_align_accuracy", []), label="All Samples", color="#1f77b4", linewidth=2)
+    axes[0, 1].plot(epochs, history.get("val_single_pos_accuracy", []), label="Positive", color="#2ca02c", linewidth=2)
+    axes[0, 1].plot(epochs, history.get("val_single_neg_accuracy", []), label="Negative", color="#d62728", linewidth=2)
+    axes[0, 1].plot(epochs, history.get("val_single_hard_neg_accuracy", []), label="Hard Neg", color="#ff7f0e", linewidth=2)
+    axes[0, 1].set_xlabel("Epoch")
+    axes[0, 1].set_ylabel("Accuracy")
+    axes[0, 1].set_title("Single-Alignment Classification (score > 0.5)")
+    axes[0, 1].set_ylim([0, 1.05])
+    axes[0, 1].legend(loc="lower right")
+    axes[0, 1].grid(True, alpha=0.4)
+
+    align_set_arr = np.array(history.get("val_align_set_score", []))
+    axes[0, 2].plot(epochs, align_set_arr, color="#9467bd", linewidth=2)
+    axes[0, 2].set_xlabel("Epoch")
+    axes[0, 2].set_ylabel("Score")
+    axes[0, 2].set_title("Alignment Set Score (partial credit)")
+    axes[0, 2].set_ylim([0, 1.05])
+    axes[0, 2].grid(True, alpha=0.4)
+
+    pos_arr = np.array(history.get("val_pos_score", []))
+    neg_arr = np.array(history.get("val_neg_score", []))
+    hard_arr = np.array(history.get("val_hard_neg_score", []))
+    axes[0, 3].plot(epochs, pos_arr, label="Positive", color="#2ca02c")
+    axes[0, 3].plot(epochs, neg_arr, label="Negative", color="#d62728")
+    axes[0, 3].plot(epochs, hard_arr, label="Hard Neg", color="#ff7f0e")
+    axes[0, 3].axhline(y=0.5, color="k", linestyle="--", alpha=0.3, label="Threshold")
+    axes[0, 3].set_xlabel("Epoch")
+    axes[0, 3].set_ylabel("Avg Score")
+    axes[0, 3].set_title("Average Scores vs 0.5 Threshold")
+    axes[0, 3].legend()
+    axes[0, 3].grid(True, alpha=0.4)
+
+    single_pos_arr = np.array(history.get("val_single_pos_accuracy", []))
+    single_neg_arr = np.array(history.get("val_single_neg_accuracy", []))
+    single_hard_arr = np.array(history.get("val_single_hard_neg_accuracy", []))
+    axes[1, 0].plot(epochs, single_pos_arr - single_neg_arr, label="Pos - Neg", color="#9467bd")
+    axes[1, 0].plot(epochs, single_pos_arr - single_hard_arr, label="Pos - Hard Neg", color="#ff7f0e")
+    axes[1, 0].set_xlabel("Epoch")
+    axes[1, 0].set_ylabel("Accuracy Gap")
+    axes[1, 0].set_title("Single-Alignment Accuracy Separation")
+    axes[1, 0].axhline(y=0, color="k", linestyle="--", alpha=0.3)
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.4)
+
+    axes[1, 1].plot(epochs, history.get("val_single_pos_accuracy", []), label="Pos > 0.5", color="#2ca02c")
+    axes[1, 1].plot(epochs, history.get("val_single_neg_accuracy", []), label="Neg <= 0.5", color="#d62728")
+    axes[1, 1].set_xlabel("Epoch")
+    axes[1, 1].set_ylabel("Recall")
+    axes[1, 1].set_title("Per-Class Threshold Recall")
+    axes[1, 1].set_ylim([0, 1.05])
+    axes[1, 1].legend(loc="lower right")
+    axes[1, 1].grid(True, alpha=0.4)
+
+    train_loss_arr = np.array(history.get("train_loss", []))
+    val_loss_arr = np.array(history.get("val_loss", []))
+    if len(train_loss_arr) > 0:
+        gap = val_loss_arr - train_loss_arr
+        axes[1, 2].plot(epochs, gap, color="darkorange", linewidth=2)
+        axes[1, 2].fill_between(epochs, 0, gap, alpha=0.2, color="darkorange")
+        axes[1, 2].set_xlabel("Epoch")
+        axes[1, 2].set_ylabel("Val - Train Loss")
+        axes[1, 2].set_title("Overfitting Gap")
+        axes[1, 2].axhline(y=0, color="k", linestyle="-", alpha=0.3)
+        axes[1, 2].grid(True, alpha=0.4)
+
+    val_bce_arr = np.array(history.get("val_bce_loss", []))
+    val_rank_arr = np.array(history.get("val_ranking_loss", []))
+    val_bound_arr = np.array(history.get("val_boundary_loss", []))
+    val_total = val_bce_arr + val_rank_arr + val_bound_arr
+    val_total = np.where(val_total == 0, 1e-8, val_total)
+    axes[1, 3].plot(epochs, val_bce_arr / val_total, label="BCE", color="#1f77b4")
+    axes[1, 3].plot(epochs, val_rank_arr / val_total, label="Ranking", color="#ff7f0e")
+    axes[1, 3].plot(epochs, val_bound_arr / val_total, label="Boundary", color="#2ca02c")
+    axes[1, 3].set_xlabel("Epoch")
+    axes[1, 3].set_ylabel("Fraction")
+    axes[1, 3].set_title("Relative Loss Contribution")
+    axes[1, 3].set_ylim([0, 1])
+    axes[1, 3].legend(loc="upper right")
+    axes[1, 3].grid(True, alpha=0.4)
+
+    fig.suptitle("New Accuracy Metrics", fontsize=16, fontweight="bold", y=1.01)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved new accuracy metrics plot to {save_path}")
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved training history plot to {save_path}")
+
+
 def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
     """
     Evaluate ranking accuracy: is positive ranked first in each group?
@@ -109,10 +232,16 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
     correct_top3 = 0
     correct_top5 = 0
     total_groups = 0
-    total_groups_with_positive =0
+    total_groups_with_positive = 0
     all_pos_scores = []
     all_neg_scores = []
     all_hard_neg_scores = []
+    alignment_set_score = 0.0
+    set_total = 0
+    set_positive_full = 0
+    set_positive_partial = 0
+    set_no_positive_correct = 0
+    set_no_positive_wrong = 0
 
     with torch.no_grad():
         for batch in dataloader:
@@ -184,7 +313,8 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
 
                 total_groups += 1
                 start_idx = end_idx
-                # Collect scores by type
+
+                # --- Collect all individual sample scores for reporting ---
                 for score, label, diff in zip(group_scores, group_labels_np, group_difficulties):
                     if label == 1.0:
                         all_pos_scores.append(score)
@@ -193,6 +323,27 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
                     else:
                         all_neg_scores.append(score)
 
+                # --- Alignment set classification per group (partial credit) ---
+                max_score = float(np.max(group_scores))
+                has_positive = pos_mask.sum() == 1
+
+                if has_positive:
+                    set_total += 1
+                    if max_score > 0.5:
+                        alignment_set_score += 1.0
+                        set_positive_full += 1
+                    else:
+                        alignment_set_score += 0.5
+                        set_positive_partial += 1
+                else:
+                    set_total += 1
+                    if max_score <= 0.5:
+                        alignment_set_score += 1.0
+                        set_no_positive_correct += 1
+                    else:
+                        alignment_set_score += 0.0
+                        set_no_positive_wrong += 1
+
     accuracy_top1 = correct_top1 / total_groups_with_positive if total_groups_with_positive > 0 else 0.0
     accuracy_top3 = correct_top3 / total_groups_with_positive if total_groups_with_positive > 0 else 0.0
     accuracy_top5 = correct_top5 / total_groups_with_positive if total_groups_with_positive > 0 else 0.0
@@ -200,7 +351,48 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
     avg_neg_score = np.mean(all_neg_scores) if all_neg_scores else 0.0
     avg_hard_neg_score = np.mean(all_hard_neg_scores) if all_hard_neg_scores else 0.0
 
-    return accuracy_top1, accuracy_top3, accuracy_top5, avg_pos_score, avg_neg_score, avg_hard_neg_score
+    # --- Single-alignment classification: per-sample accuracy with fixed threshold 0.5 ---
+    # Iterate over full batch arrays after the group loop (covers all samples)
+    all_single_total = len(scores_np)
+    all_single_correct = 0
+    pos_correct = 0
+    neg_correct = 0
+    hard_neg_correct = 0
+
+    for score, label, diff in zip(scores_np, labels_np, difficulties):
+        if label == 1.0:
+            if score > 0.5:
+                pos_correct += 1
+            all_single_correct += 1
+        else:
+            if score <= 0.5:
+                neg_correct += 1
+                if diff == "hard_negative":
+                    hard_neg_correct += 1
+            all_single_correct += 1
+
+    single_align_accuracy = all_single_correct / all_single_total if all_single_total > 0 else 0.0
+    single_align_pos_accuracy = pos_correct / len(all_pos_scores) if all_pos_scores else 0.0
+    single_align_neg_accuracy = neg_correct / len(all_neg_scores) if all_neg_scores else 0.0
+    single_align_hard_neg_accuracy = hard_neg_correct / len(all_hard_neg_scores) if all_hard_neg_scores else 0.0
+
+    # Alignment set classification score (partial credit per alignment set)
+    align_set_score = alignment_set_score / set_total if set_total > 0 else 0.0
+
+    return (
+        accuracy_top1, accuracy_top3, accuracy_top5,
+        avg_pos_score, avg_neg_score, avg_hard_neg_score,
+        single_align_accuracy, single_align_pos_accuracy,
+        single_align_neg_accuracy, single_align_hard_neg_accuracy,
+        align_set_score,
+        {
+            "set_total": set_total,
+            "positive_full": set_positive_full,
+            "positive_partial": set_positive_partial,
+            "no_positive_correct": set_no_positive_correct,
+            "no_positive_wrong": set_no_positive_wrong,
+        },
+    )
 
 def debug_group_structure(batch):
     """
