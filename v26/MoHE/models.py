@@ -13,21 +13,46 @@ so all the models here will output the logits (before sigmoids)
 and whenever the model is used, sigmoid should be applied afterwards
 """
 
-class BaselineScorer(nn.Module):
+
+class RGBScorer(nn.Module):
     """Baseline: Just RGB through ViT."""
 
-    def __init__(self, pretrained_name="google/vit-base-patch16-224"):
+    def __init__(self, 
+                pretrained_vit_name="google/vit-base-patch16-224",
+                freeze_vit_layers=0,
+                dropout=0.3):
+
         super().__init__()
-        self.vit = ViTModel.from_pretrained(pretrained_name)
+        self.vit = ViTModel.from_pretrained(pretrained_vit_name)
+
+        # Freeze early layers
+        self.frozen_layers = freeze_vit_layers
+        if self.frozen_layers > 0:
+            for name, param in self.vit.named_parameters():
+                layer_num = self._extract_layer_num(name)
+                if layer_num is not None and layer_num < freeze_vit_layers:
+                    param.requires_grad = False
+                else:
+                    param.requires_grad = True
+
+        self.dropout = dropout
 
         # Simple scoring head
         self.scorer = nn.Sequential(
             nn.Linear(768, 256),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(self.dropout),
             nn.Linear(256, 1),
             # nn.Sigmoid(),
         )
+
+    def _extract_layer_num(self, param_name):
+        """Extract layer number from parameter name."""
+        import re
+        match = re.search(r'encoder\.layer\.(\d+)', param_name)
+        if match:
+            return int(match.group(1))
+        return None
 
     def forward(self, rgb):
         """

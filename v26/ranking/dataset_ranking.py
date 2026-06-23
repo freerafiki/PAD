@@ -21,6 +21,8 @@ import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
 import re
 import json
+import pickle
+import random
 from torch.utils.data import Sampler
 
 # ============================================================================
@@ -298,34 +300,46 @@ class PrecomposedAlignmentDataset(Dataset):
 
     def __init__(self,
                  data_root,
-                 max_negatives_per_positive=4,
+                 max_negatives_per_positive=12,
+                 min_negatives_per_positive=4,
                  hard_negative_ratio=0.5,
                  radius=20,
                  threshold=15,
                  transform=None,
                  debug_mode=False,
+                 limit_to_N=0,
+                 limit_by_num_pairs=True,
+                 positive_ratio=0.1,
                  augment=False,
                  augment_cfg=None):
         """
         Args:
             data_root: Path to data directory with positive/negative/hard_negative/non_neighbour folders
-            negatives_per_positive: How many negatives to sample per positive
+            max_negatives_per_positive: Maximum negatives to sample per positive
+            min_negatives_per_positive: Minimum negatives to sample per positive (actual count
+                                        is uniformly sampled from [min, max] each epoch)
             hard_negative_ratio: Fraction of negatives that should be hard
             radius: Radius for proximity feature computation
             threshold: Threshold for contact region computation
             transform: Optional torchvision transforms for RGB images
-            include_non_neighbours: If True, include non-neighbour pairs in training
-            non_neighbour_ratio: Fraction of batches that should be non-neighbour (0.0-1.0)
             debug_mode: If True, limit dataset to 1000 images per category for fast testing
+            limit_to_N: Number of images (limit_by_num_pairs=False) or pairs (limit_by_num_pairs=True) to load
+            limit_by_num_pairs: If True, limit_to_N limits by number of complete pairs.
+                                If False, limit_to_N limits by number of images per category (old behavior).
+            positive_ratio: Fraction of positive images in image-level limit mode
             augment: If True, apply data augmentation (requires augment_cfg)
             augment_cfg: AugmentationConfig object with transform parameters
         """
         self.data_root = Path(data_root)
         self.max_negatives_per_positive = max_negatives_per_positive
+        self.min_negatives_per_positive = min_negatives_per_positive
         self.hard_negative_ratio = hard_negative_ratio
         self.radius = radius
         self.threshold = threshold
         self.debug_mode = debug_mode
+        self.limit_to_N = limit_to_N
+        self.limit_by_num_pairs = limit_by_num_pairs
+        self.positive_ratio = positive_ratio
         self.augment = augment
         self.augment_cfg = augment_cfg
 
@@ -384,19 +398,11 @@ class PrecomposedAlignmentDataset(Dataset):
         #     # We'll use a probabilistic approach in __getitem__
         #     pass
 
-    def _group_by_pairs(self):
-        """
-        Scan all files and group by piece pair.
-
-        Returns:
-            dict: {pair_key: {'positive': [...], 'negative': [...], 'hard_negative': [...], 'non_neighbour': [...]}}
-        """
-        from itertools import islice
-
+    def _build_pair_index_from_scratch(self):
+        """Scan ALL files and build the complete pair index (no limit)."""
         pairs = {}
-        # non_neighbour_pairs = {}
+        missing_mask_count = 0
 
-        # Process standard categories
         for category in ['positive', 'negative', 'hard_negative']:
             images_dir = self.data_root / category / 'images'
             masks_dir = self.data_root / category / 'masks'
@@ -404,27 +410,22 @@ class PrecomposedAlignmentDataset(Dataset):
             if not images_dir.exists():
                 print(f"Warning: {images_dir} does not exist")
                 continue
-            
-            for img_path in (islice(images_dir.glob('*.png'), 1000) if self.debug_mode else images_dir.glob('*.png')):
-            # for img_path in images_dir.glob('*.png'):
-                # Classify file
+
+            for img_path in images_dir.glob('*.png'):
                 file_type = classify_file(img_path.name)
                 if file_type == 'ignore':
                     continue
 
-                # Get pair identifier
                 pair_key = get_pair_key(img_path.name)
                 if not pair_key:
                     print(f"Warning: Could not parse {img_path.name}")
                     continue
 
-                # Check mask exists
                 mask_path = masks_dir / img_path.name
                 if not mask_path.exists():
-                    print(f"Warning: No mask for {img_path.name}")
+                    missing_mask_count += 1
                     continue
 
-                # Initialize pair entry
                 if pair_key not in pairs:
                     pairs[pair_key] = {
                         'positive': [],
@@ -432,11 +433,9 @@ class PrecomposedAlignmentDataset(Dataset):
                         'hard_negative': []
                     }
 
-                # Parse metadata
                 parsed = parse_filename(img_path.name)
                 score = get_difficulty_score(img_path.name)
 
-                # Add to appropriate category
                 pairs[pair_key][file_type].append({
                     'image_path': str(img_path),
                     'mask_path': str(mask_path),
@@ -448,59 +447,167 @@ class PrecomposedAlignmentDataset(Dataset):
                     'category': file_type,
                     'label': 1.0 if file_type == 'positive' else 0.0
                 })
-        
-        # # Process non-neighbour category
-        # non_neighbour_dir = self.data_root / 'non_neighbour'
-        # if non_neighbour_dir.exists():
-        #     images_dir = non_neighbour_dir / 'images'
-        #     masks_dir = non_neighbour_dir / 'masks'
-            
-        #     if images_dir.exists():
-        #         for img_path in images_dir.glob('*.png'):
-        #             # Classify as non_neighbour
-        #             file_type = classify_file(img_path.name, is_non_neighbour_folder=True)
-                    
-        #             # Get pair identifier (may be from different puzzles)
-        #             pair_key = get_pair_key(img_path.name)
-        #             if not pair_key:
-        #                 # For non-neighbours, create a unique key from filename
-        #                 pair_key = f"non_neighbour_{img_path.stem}"
-                    
-        #             # Check mask exists
-        #             mask_path = masks_dir / img_path.name
-        #             if not mask_path.exists():
-        #                 print(f"Warning: No mask for {img_path.name}")
-        #                 continue
-                    
-        #             # Parse metadata (may fail for non-standard names)
-        #             parsed = parse_filename(img_path.name)
-                    
-        #             # Initialize non-neighbour pair entry
-        #             if pair_key not in non_neighbour_pairs:
-        #                 non_neighbour_pairs[pair_key] = {
-        #                     'samples': []
-        #                 }
-                    
-        #             # Add sample
-        #             non_neighbour_pairs[pair_key]['samples'].append({
-        #                 'image_path': str(img_path),
-        #                 'mask_path': str(mask_path),
-        #                 'pair_key': pair_key,
-        #                 'puzzle_id': parsed['puzzle_id'] if parsed else 'unknown',
-        #                 'piece1_id': parsed['piece1_id'] if parsed else 'unknown',
-        #                 'piece2_id': parsed['piece2_id'] if parsed else 'unknown',
-        #                 'difficulty_score': None,
-        #                 'category': 'non_neighbour',
-        #                 'label': 0.0  # All non-neighbour samples have label 0
-        #             })
-        #     else:
-        #         print(f"Warning: {images_dir} does not exist")
-        # else:
-        #     print(f"Info: No non_neighbour directory found at {non_neighbour_dir}")
 
-        # Sort hard negatives by difficulty score (highest = hardest)
+        return pairs, missing_mask_count
+
+    def _load_or_build_pair_index(self):
+        """
+        Load pair index from pickle cache, or build from scratch and cache it.
+        Cache is invalidated when the number of files in any category changes.
+        """
+        cache_path = self.data_root / '_pair_index.pkl'
+
+        # Build file metadata for cache validation (just file counts per category)
+        current_meta = {}
+        for cat in ['positive', 'negative', 'hard_negative']:
+            d = self.data_root / cat / 'images'
+            if d.exists():
+                current_meta[cat] = len(list(d.glob('*.png')))
+            else:
+                current_meta[cat] = 0
+
+        # Try to load from cache
+        if cache_path.exists():
+            try:
+                with open(cache_path, 'rb') as f:
+                    cached = pickle.load(f)
+                if cached.get('file_meta') == current_meta:
+                    print(f"  Loaded {len(cached['pairs'])} pairs from cache: {cache_path.name}")
+                    return cached['pairs'], cached.get('missing_mask_count', 0)
+                else:
+                    print(f"  Cache invalid (file count changed), rebuilding...")
+            except Exception as e:
+                print(f"  Cache load failed ({e}), rebuilding...")
+
+        # Build from scratch
+        pairs, missing = self._build_pair_index_from_scratch()
+
+        # Save to cache
+        try:
+            cache_data = {
+                'pairs': pairs,
+                'file_meta': current_meta,
+                'missing_mask_count': missing,
+            }
+            with open(cache_path, 'wb') as f:
+                pickle.dump(cache_data, f)
+            print(f"  Saved {len(pairs)} pairs to cache: {cache_path.name}")
+        except Exception as e:
+            print(f"  Warning: failed to save cache ({e})")
+
+        return pairs, missing
+
+    def _group_by_pairs(self):
+        """
+        Build the pair index (via cache or image-level limit) and apply pair-level limit if needed.
+
+        Returns:
+            dict: {pair_key: {'positive': [...], 'negative': [...], 'hard_negative': [...]}}
+        """
+        if self.debug_mode:
+            # ─── Debug mode: fast image-level limit (1000 images per category) ───
+            print("\t ! DEBUG MODE: limiting to 1000 images per category")
+            pairs, self.missing_mask_count = self._build_pair_index_from_scratch()
+
+            total = sum(len(v) for p in pairs.values() for v in p.values() if isinstance(v, list))
+            if total > 0:
+                # Sub-sample pairs randomly to roughly match the old behavior
+                all_keys = list(pairs.keys())
+                random.Random(42).shuffle(all_keys)
+                selected = set(all_keys[:min(1000, len(all_keys))])
+                pairs = {k: v for k, v in pairs.items() if k in selected}
+                print(f"\t ! DEBUG: selected {len(pairs)} pairs")
+        elif self.limit_to_N > 0 and not self.limit_by_num_pairs:
+            # ─── Image-level limit (old behavior) ───
+            from itertools import islice
+            pairs = {}
+            self.missing_mask_count = 0
+
+            forced_dataset_size = self.limit_to_N
+            print(f"\t ! Loading reduced dataset: using only {forced_dataset_size} images (image-level limit)")
+
+            n_positive    = int(forced_dataset_size * self.positive_ratio)
+            n_negative    = forced_dataset_size - n_positive
+
+            neg_categories = ['negative', 'hard_negative']
+            neg_counts = {
+                cat: sum(1 for _ in (self.data_root / cat / 'images').glob('*.png'))
+                    if (self.data_root / cat / 'images').exists() else 0
+                for cat in neg_categories
+            }
+            total_neg_available = sum(neg_counts.values())
+
+            category_limits = {'positive': n_positive}
+            for cat in neg_categories:
+                category_limits[cat] = (
+                    int(n_negative * neg_counts[cat] / total_neg_available)
+                    if total_neg_available > 0 else 0
+                )
+
+            print(f"[reduced dataset] limits -> {category_limits}")
+
+            for category in ['positive', 'negative', 'hard_negative']:
+                images_dir = self.data_root / category / 'images'
+                masks_dir = self.data_root / category / 'masks'
+
+                if not images_dir.exists():
+                    print(f"Warning: {images_dir} does not exist")
+                    continue
+
+                limit = category_limits.get(category)
+                for img_path in islice(images_dir.glob('*.png'), limit):
+                    file_type = classify_file(img_path.name)
+                    if file_type == 'ignore':
+                        continue
+
+                    pair_key = get_pair_key(img_path.name)
+                    if not pair_key:
+                        print(f"Warning: Could not parse {img_path.name}")
+                        continue
+
+                    mask_path = masks_dir / img_path.name
+                    if not mask_path.exists():
+                        self.missing_mask_count += 1
+                        continue
+
+                    if pair_key not in pairs:
+                        pairs[pair_key] = {
+                            'positive': [],
+                            'negative': [],
+                            'hard_negative': []
+                        }
+
+                    parsed = parse_filename(img_path.name)
+                    score = get_difficulty_score(img_path.name)
+
+                    pairs[pair_key][file_type].append({
+                        'image_path': str(img_path),
+                        'mask_path': str(mask_path),
+                        'pair_key': pair_key,
+                        'puzzle_id': parsed['puzzle_id'],
+                        'piece1_id': parsed['piece1_id'],
+                        'piece2_id': parsed['piece2_id'],
+                        'difficulty_score': score,
+                        'category': file_type,
+                        'label': 1.0 if file_type == 'positive' else 0.0
+                    })
+        else:
+            # ─── Load full index (via cache) ───
+            pairs, self.missing_mask_count = self._load_or_build_pair_index()
+
+            if self.limit_to_N > 0 and self.limit_by_num_pairs:
+                # ─── Pair-level limit: select N complete pairs ───
+                all_keys = list(pairs.keys())
+                random.Random(42).shuffle(all_keys)
+                n_keep = min(self.limit_to_N, len(all_keys))
+                selected = set(all_keys[:n_keep])
+                pairs = {k: v for k, v in pairs.items() if k in selected}
+                print(f"\t ! Selected {n_keep} / {len(all_keys)} pairs (limit={self.limit_to_N})")
+
+        # ─── Post-processing: sort hard negatives, mark neighbour status ───
         self.neighbour_pairs = 0
         self.non_neighbour_pairs = 0
+        self._non_neighbour_indices = set()
         for j, pair_data in enumerate(pairs.values()):
             if pair_data['hard_negative']:
                 pair_data['hard_negative'].sort(
@@ -511,17 +618,9 @@ class PrecomposedAlignmentDataset(Dataset):
                 pair_data['non_neighbours'] = True
                 self.non_neighbour_pairs += 1
                 self._non_neighbour_indices.add(j)
-
             else:
                 pair_data['non_neighbours'] = False
                 self.neighbour_pairs += 1
-
-
-        # Filter: only keep pairs with at least 1 positive
-        # pairs = {k: v for k, v in pairs.items()} # if len(v['positive']) > 0}
-        
-        # Store non_neighbour pairs in main dict for unified access
-        # pairs['non_neighbour'] = non_neighbour_pairs
 
         return pairs
 
@@ -544,6 +643,24 @@ class PrecomposedAlignmentDataset(Dataset):
         print(f"  Total hard negative samples: {total_hard}")
         print(f"    Avg negatives per pair: {(total_neg + total_hard) / max(len(self.pairs), 1):.2f}")
 
+        # Image count per pair distribution
+        img_counts = [
+            len(p.get('positive', [])) + len(p.get('negative', [])) + len(p.get('hard_negative', []))
+            for p in self.pairs.values()
+        ]
+        if img_counts:
+            print(f"\n  Images per pair distribution:")
+            max_n = min(max(img_counts), 20)
+            for n in range(1, max_n + 1):
+                count = sum(1 for c in img_counts if c == n)
+                if count > 0:
+                    print(f"    {n:2d} images -> {count:5d} pairs ({count / len(img_counts) * 100:5.1f}%)")
+            remaining = sum(1 for c in img_counts if c > max_n)
+            if remaining > 0:
+                print(f"    >{max_n:2d} images -> {remaining:5d} pairs ({remaining / len(img_counts) * 100:5.1f}%)")
+
+        if self.missing_mask_count > 0:
+            print(f"  ⚠️  {self.missing_mask_count} samples skipped due to missing masks")
 
         # Check pairs with insufficient negatives
         insufficient = sum(1 for p in self.pairs.values()
@@ -603,9 +720,12 @@ class PrecomposedAlignmentDataset(Dataset):
             selected_negatives.extend(available_hard)
             selected_negatives.extend(available_easy)
         else:
-            # Sample up to max, respecting ratio
-            n_hard_target = int(self.max_negatives_per_positive * self.hard_negative_ratio)
-            n_easy_target = self.max_negatives_per_positive - n_hard_target
+            # Sample a random number of negatives between min and max
+            n_target = np.random.randint(self.min_negatives_per_positive,
+                                         self.max_negatives_per_positive + 1)
+
+            n_hard_target = int(n_target * self.hard_negative_ratio)
+            n_easy_target = n_target - n_hard_target
             
             if positive_pair == False:
                 n_easy_target += 1
@@ -615,7 +735,7 @@ class PrecomposedAlignmentDataset(Dataset):
                 n_hard = min(n_hard_target, len(available_hard))
                 selected_negatives.extend(available_hard[:n_hard])  # Take top N hardest
             
-            # Sample easy negatives
+            # Sample easy negatives (take all if not enough, otherwise sample)
             if available_easy:
                 n_easy_actual = min(n_easy_target, len(available_easy))
                 if len(available_easy) <= n_easy_actual:
@@ -873,16 +993,28 @@ class PrecomposedAlignmentDataset(Dataset):
         # Load RGB
         rgb_image = Image.open(sample['image_path']).convert('RGB')
 
-        # Load mask
-        mask_image = Image.open(sample['mask_path']).convert('L')
-        mask_array = np.array(mask_image)
+        # Check for pre-computed geometric features (.npy cache)
+        geom_npy_path = Path(sample['mask_path']).with_suffix('.npy')
+        if geom_npy_path.exists():
+            geometric_resized = np.load(geom_npy_path)
+        else:
+            # Load mask and resize to 224x224 with NEAREST to preserve label values
+            mask_image = Image.open(sample['mask_path']).convert('L')
 
-        # Create geometric features BEFORE resizing
-        geometric_features = self._create_geometric_features(mask_array)
+            orig_w, orig_h = mask_image.size
+            scale_224 = 224.0 / max(orig_w, orig_h)
 
-        # Resize to 224x224
+            mask_resized = mask_image.resize((224, 224), Image.NEAREST)
+            mask_array = np.array(mask_resized)
+
+            scaled_radius = max(1, int(round(self.radius * scale_224)))
+            scaled_threshold = max(1, int(round(self.threshold * scale_224)))
+            geometric_resized = self._create_geometric_features(mask_array,
+                                                                 radius=scaled_radius,
+                                                                 threshold=scaled_threshold)
+
+        # Resize RGB to 224x224
         rgb_resized = rgb_image.resize((224, 224), Image.BILINEAR)
-        geometric_resized = self._resize_geometric_features(geometric_features, (224, 224))
 
         # Apply augmentation to BOTH rgb and geometric after resize
         if self.augment and self.augment_cfg is not None and self.augment_cfg.ENABLED:
@@ -940,9 +1072,14 @@ class PrecomposedAlignmentDataset(Dataset):
 
         return rgb_pil, geometric_np
 
-    def _create_geometric_features(self, mask_array):
+    def _create_geometric_features(self, mask_array, radius=None, threshold=None):
         """
         Create 3 geometric feature channels.
+
+        Args:
+            mask_array: (H, W) label mask with two piece values
+            radius: Optional override for self.radius (used for proximity falloff)
+            threshold: Optional override for self.threshold (used for contact width)
 
         Returns:
             geometric: (3, H, W) numpy array
@@ -960,17 +1097,17 @@ class PrecomposedAlignmentDataset(Dataset):
         mask_B = mask_array == val_B
 
         # Proximity channels (inclusive of piece interior)
-        proximity_A = self._compute_proximity_inclusive(mask_A, mask_B)
-        proximity_B = self._compute_proximity_inclusive(mask_B, mask_A)
+        proximity_A = self._compute_proximity_inclusive(mask_A, mask_B, radius=radius)
+        proximity_B = self._compute_proximity_inclusive(mask_B, mask_A, radius=radius)
 
         # Contact region
-        contact_strength = self._compute_contact_region_edge_based(mask_A, mask_B)
+        contact_strength = self._compute_contact_region_edge_based(mask_A, mask_B, threshold=threshold)
 
         geometric = np.stack([proximity_A, proximity_B, contact_strength], axis=0)
 
         return geometric.astype(np.float32)
 
-    def _compute_proximity_inclusive(self, mask, other_mask):
+    def _compute_proximity_inclusive(self, mask, other_mask, radius=None):
         """
         Proximity that includes pixels INSIDE the mask.
 
@@ -980,6 +1117,7 @@ class PrecomposedAlignmentDataset(Dataset):
         Args:
             mask: Binary mask of the piece
             other_mask: Binary mask of the other piece (for overlap detection)
+            radius: Optional override for self.radius (proximity falloff distance)
 
         Returns:
             proximity: (H, W) array in [0, 1]
@@ -991,7 +1129,7 @@ class PrecomposedAlignmentDataset(Dataset):
 
         from scipy.ndimage import distance_transform_edt
 
-        radius = self.radius
+        radius = self.radius if radius is None else radius
 
         # Distance from outside to mask
         dist_outside = distance_transform_edt(~mask)
@@ -1041,7 +1179,7 @@ class PrecomposedAlignmentDataset(Dataset):
 
         return proximity
 
-    def _compute_contact_region_edge_based(self, mask_A, mask_B):
+    def _compute_contact_region_edge_based(self, mask_A, mask_B, threshold=None):
         """
         Contact region based on edge-to-edge distance.
 
@@ -1049,10 +1187,15 @@ class PrecomposedAlignmentDataset(Dataset):
         - Compute distance to edge of piece A
         - Compute distance to edge of piece B
         - If both are small, it's in the contact region
+
+        Args:
+            mask_A: Binary mask of piece A
+            mask_B: Binary mask of piece B
+            threshold: Optional override for self.threshold (contact band width)
         """
         from scipy.ndimage import distance_transform_edt, binary_erosion
 
-        threshold = self.threshold
+        threshold = self.threshold if threshold is None else threshold
 
         # Extract edges (boundaries) of each piece
         edge_A = mask_A & ~binary_erosion(mask_A)
@@ -1155,6 +1298,7 @@ class PrecomposedAlignmentDataset(Dataset):
         new_dataset = PrecomposedAlignmentDataset.__new__(PrecomposedAlignmentDataset)
         new_dataset.data_root = self.data_root
         new_dataset.max_negatives_per_positive = self.max_negatives_per_positive
+        new_dataset.min_negatives_per_positive = self.min_negatives_per_positive
         new_dataset.hard_negative_ratio = self.hard_negative_ratio
         new_dataset.transform = self.transform
         new_dataset.pairs = self.pairs  # Share the pairs dict (read-only)
@@ -1163,6 +1307,7 @@ class PrecomposedAlignmentDataset(Dataset):
         new_dataset.neighbour_pairs = self.neighbour_pairs
         new_dataset.radius = radius
         new_dataset.threshold = threshold
+        new_dataset.missing_mask_count = self.missing_mask_count
         new_dataset.non_neighbour_ratio = self.non_neighbour_pairs / len(self.pairs)
         new_dataset.augment = use_augment
         new_dataset.augment_cfg = use_augment_cfg
@@ -1270,6 +1415,7 @@ class PrecomposedAlignmentDataset(Dataset):
                 'seed': seed,
                 'data_root': str(self.data_root),
                 'max_negatives_per_positive': self.max_negatives_per_positive,
+                'min_negatives_per_positive': self.min_negatives_per_positive,
                 'hard_negative_ratio': self.hard_negative_ratio,
                 'radius': self.radius,
                 'threshold': self.threshold,
@@ -1282,8 +1428,9 @@ class PrecomposedAlignmentDataset(Dataset):
 
     @staticmethod
     def from_split_file(split_path, data_root=None, max_negatives_per_positive=4,
-                         hard_negative_ratio=0.5, radius=20, threshold=15,
-                         transform=None, debug_mode=False):
+                         min_negatives_per_positive=None, hard_negative_ratio=0.5,
+                         radius=20, threshold=15, transform=None, debug_mode=False,
+                         limit_to_N=0, limit_by_num_pairs=True):
         """
         Load a saved split from JSON and create train/val/test datasets.
 
@@ -1291,11 +1438,14 @@ class PrecomposedAlignmentDataset(Dataset):
             split_path: Path to the JSON split file (created by save_split)
             data_root: Override data_root (uses the one from split file if None)
             max_negatives_per_positive: Override if needed
+            min_negatives_per_positive: Override if needed (uses stored value if None)
             hard_negative_ratio: Override if needed
             radius: Override if needed
             threshold: Override if needed
             transform: Optional transform (uses default if None)
             debug_mode: If True, limit dataset
+            limit_to_N: Number of pairs (limit_by_num_pairs=True) or images (False) to load
+            limit_by_num_pairs: If True, limit_to_N limits by number of complete pairs
 
         Returns:
             train_dataset, val_dataset, test_dataset
@@ -1306,6 +1456,7 @@ class PrecomposedAlignmentDataset(Dataset):
         params = split['params']
         root = Path(data_root or params['data_root'])
         max_neg = max_negatives_per_positive or params['max_negatives_per_positive']
+        min_neg = min_negatives_per_positive if min_negatives_per_positive is not None else params.get('min_negatives_per_positive', 4)
         hn_ratio = hard_negative_ratio or params['hard_negative_ratio']
         rad = radius or params['radius']
         thr = threshold or params['threshold']
@@ -1315,11 +1466,14 @@ class PrecomposedAlignmentDataset(Dataset):
         full_dataset = PrecomposedAlignmentDataset(
             data_root=root,
             max_negatives_per_positive=max_neg,
+            min_negatives_per_positive=min_neg,
             hard_negative_ratio=hn_ratio,
             radius=rad,
             threshold=thr,
             transform=transform,
             debug_mode=debug_mode,
+            limit_to_N=limit_to_N,
+            limit_by_num_pairs=limit_by_num_pairs,
         )
 
         train_dataset = full_dataset.create_split(

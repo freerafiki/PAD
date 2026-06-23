@@ -6,16 +6,15 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dataset_ranking import (
+from ranking.dataset_ranking import (
     PrecomposedAlignmentDataset,
     ShuffledBatchSampler,
     collate_alignment_samples,
 )
-from models_ranking import MultiModalScorerV2_Practical, MultiModalScorerWeightedVit, MultiModalScorerWeightedViTFiLM, GeometricScorer, BaselineScorer
-from loss_ranking import AdaptiveTopNRankingLoss, BoundaryPairwiseCorrelationLoss, BoundaryPseudoRankingLoss
-from training_utils import evaluate_ranking, estimate_data_needs, diagnose_data_sufficiency, plot_training_history, plot_new_accuracy_metrics
-from config import Config
-
+from MoHE.models import RGBScorer
+from MoHE.config import Config
+from ranking.loss_ranking import AdaptiveTopNRankingLoss, BoundaryPairwiseCorrelationLoss, BoundaryPseudoRankingLoss
+from ranking.training_utils import evaluate_ranking, estimate_data_needs, diagnose_data_sufficiency, plot_training_history, plot_new_accuracy_metrics
 
 def train_model(
     model,
@@ -29,11 +28,11 @@ def train_model(
     device="cuda",
     save_dir="checkpoints",
     model_name="model",
-    early_stopping_patience=10,
-    bce_weight=0.15,
-    ranking_weight=0.55,
-    ranking_margin=0.3,
-    boundary_weight=0.3,
+    early_stopping_patience=5,
+    bce_weight=1,
+    ranking_weight=0,
+    ranking_margin=0,
+    boundary_weight=0,
     hard_negative_weight=2.0,
     top_n=3,
     temperature=1.0,
@@ -159,12 +158,7 @@ def train_model(
 
             optimizer.zero_grad()
 
-            if isinstance(model, MultiModalScorerV2_Practical) or isinstance(model, MultiModalScorerWeightedVit):
-                logits = model(rgb, rgb_geometric).squeeze()
-            elif isinstance(model, GeometricScorer):
-                logits = model(rgb_geometric).squeeze()
-            else:
-                logits = model(rgb).squeeze()
+            logits = model(rgb).squeeze()
 
             scores = torch.sigmoid(logits).squeeze()
 
@@ -213,12 +207,7 @@ def train_model(
                 difficulties = batch["difficulties"]
                 group_sizes = batch['group_sizes']
 
-                if isinstance(model, MultiModalScorerV2_Practical) or isinstance(model, MultiModalScorerWeightedVit):
-                    logits = model(rgb, rgb_geometric).squeeze()
-                elif isinstance(model, GeometricScorer):
-                    logits = model(rgb_geometric).squeeze()
-                else:
-                    logits = model(rgb).squeeze()
+                logits = model(rgb).squeeze()
 
                 scores = torch.sigmoid(logits).squeeze()
 
@@ -238,12 +227,7 @@ def train_model(
         avg_val_ranking = val_ranking_loss / num_batches
         avg_val_boundary = val_boundary_loss / num_batches
 
-        if isinstance(model, MultiModalScorerV2_Practical) or isinstance(model, MultiModalScorerWeightedVit):
-            model_type = "multimodal"
-        elif isinstance(model, GeometricScorer):
-            model_type = "geometric"
-        else:
-            model_type = "baseline"
+        model_type = "RGB"
         val_acc, val_top3_acc, val_top5_acc, avg_pos, avg_neg, avg_hard_neg, single_align_acc, single_pos_acc, single_neg_acc, single_hard_neg_acc, align_set_acc, align_set_breakdown = evaluate_ranking(
             model, val_loader, device, model_type=model_type
         )
@@ -335,6 +319,7 @@ def main():
         debug_mode=cfg.data.DEBUG,
         limit_to_N=cfg.data.NUM_PAIRS_LIMIT,
         limit_by_num_pairs=True,
+        positive_ratio=cfg.data.POSITIVE_RATIO,
     )
 
     if args.load_split:
@@ -345,7 +330,7 @@ def main():
             hard_negative_ratio=0.5,
             radius=cfg.data.RADIUS,
             threshold=cfg.data.THRESHOLD,
-            debug_mode=cfg.data.DEBUG,
+            debug_mode=cfg.data.DEBUG
         )
     else:
         # Create split on the fly
@@ -378,30 +363,14 @@ def main():
         print("No puzzle overlap between train and val")
 
     print("\n" + "=" * 60)
-    if cfg.model.FILM_ENABLED:
-        print("TRAINING MODEL: RGB + Geometry + DINO + FiLM (with contact-weighted pooling)")
-    else:
-        print("TRAINING MODEL: RGB + Geometry + DINO (with geometric channel scaling)")
+    print("TRAINING MODEL for OPTION 1: RGB + ViT + BCE")
     print("=" * 60)
 
-    if cfg.model.FILM_ENABLED:
-        model = MultiModalScorerWeightedViTFiLM(
-            dino_model=cfg.model.DINO_MODEL,
-            geometric_vit=cfg.model.VIT_MODEL,
-            freeze_vit_layers=cfg.model.FROZEN_LAYERS,
-            dropout=cfg.model.DROPOUT,
-            geometric_channel_scale=cfg.model.GEOMETRIC_CHANNEL_SCALE,
-            t_dim=cfg.model.FILM_T_DIM,
-            film_layers=cfg.model.FILM_LAYERS,
-        )
-    else:
-        model = MultiModalScorerV2_Practical(
-            dino_model=cfg.model.DINO_MODEL,
-            geometric_vit=cfg.model.VIT_MODEL,
-            freeze_vit_layers=cfg.model.FROZEN_LAYERS,
-            dropout=cfg.model.DROPOUT,
-            geometric_channel_scale=cfg.model.GEOMETRIC_CHANNEL_SCALE,
-        )
+    model = RGBScorer(
+        pretrained_vit_name=cfg.model.VIT_MODEL,
+        freeze_vit_layers=cfg.model.FROZEN_LAYERS,
+        dropout=cfg.model.DROPOUT,
+    )
 
     optimizer = optim.AdamW(
         model.parameters(),
@@ -463,7 +432,7 @@ def main():
         lr=cfg.training.LEARNING_RATE,
         weight_decay=cfg.training.WEIGHT_DECAY,
         early_stopping_patience=cfg.training.EARLY_STOPPING_PATIENCE,
-        model_name="WeightedViTFilm",
+        model_name=cfg.name,
         bce_weight=cfg.loss.BCE_WEIGHT,
         ranking_weight=cfg.loss.RANKING_WEIGHT,
         boundary_weight=cfg.loss.BOUNDARY_WEIGHT,

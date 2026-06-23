@@ -254,7 +254,7 @@ def evaluate_ranking(model, dataloader, device, model_type='multimodal'):
             # Get logits and convert to probabilities
             if model_type == 'geometric':
                 logits = model(rgb_geometric)
-            elif model_type == 'baseline':
+            elif model_type == 'baseline' or model_type == 'RGB':
                 logits = model(rgb)
             else:
                 logits = model(rgb, rgb_geometric)

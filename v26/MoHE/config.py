@@ -13,8 +13,8 @@ class DataConfig:
     MAX_NEGATIVES_PER_POSITIVE: int = 16
     TRAIN_RATIO: float = 0.8
     SEED: int = 42
-    DEBUG: bool = False         # Limit dataset to 1000 images per category for fast testing
-    NUM_PAIRS_LIMIT: int = 0    # Limit to N *pairs* (0 = use all data). Each pair = 1 positive + 4-16 negatives.
+    DEBUG: bool = False             # Limit dataset to 1000 images per category for fast testing
+    NUM_PAIRS_LIMIT: int = 5000     # Limit to N *pairs* (0 = use all data). Each pair = 1 positive + 4-16 negatives.
     POSITIVE_RATIO: float = 0.1
     # Geometric feature computation
     RADIUS: int = 25
@@ -23,24 +23,25 @@ class DataConfig:
 
 @dataclass
 class ModelConfig:
+    TYPE: str = 'RGB'
     # DINO_MODEL: str = "facebook/dinov2-base"
     DINO_MODEL: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
     VIT_MODEL: str = "google/vit-base-patch16-224"
     FROZEN_LAYERS: int = 8
     DROPOUT: float = 0.5
     GEOMETRIC_CHANNEL_SCALE: float = 1.0  # Multiplier for channels 3-5 of rgb_geometric
-    FILM_ENABLED: bool = True
+    FILM_ENABLED: bool = False
     FILM_T_DIM: int = 64
     FILM_LAYERS: tuple = (8, 9, 10, 11)
 
 
 @dataclass
 class TrainingConfig:
-    BATCH_SIZE: int = 8
-    NUM_EPOCHS: int = 7
+    BATCH_SIZE: int = 32
+    NUM_EPOCHS: int = 25
     LEARNING_RATE: float = 1e-4
     WEIGHT_DECAY: float = 1e-4
-    EARLY_STOPPING_PATIENCE: int = 4
+    EARLY_STOPPING_PATIENCE: int = 5
     GRAD_CLIP_MAX_NORM: float = 1.0
     BCE_POS_WEIGHT: float = 4.0
     DEVICE: str = field(default_factory=lambda: "cuda" if __import__("torch").cuda.is_available() else "cpu")
@@ -48,9 +49,9 @@ class TrainingConfig:
 
 @dataclass
 class LossConfig:
-    BCE_WEIGHT: float = 0.6
-    RANKING_WEIGHT: float = 0.15
-    BOUNDARY_WEIGHT: float = 0.15
+    BCE_WEIGHT: float = 1
+    RANKING_WEIGHT: float = 0
+    BOUNDARY_WEIGHT: float = 0
     RANKING_MARGIN: float = 0.3
     HARD_NEGATIVE_WEIGHT: float = 2.0
     TOP_N: int = 3
@@ -85,3 +86,4 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
+    name: str = "Option1_RGB"

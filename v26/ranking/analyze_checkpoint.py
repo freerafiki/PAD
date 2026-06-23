@@ -105,6 +105,7 @@ def load_data_and_model(ckpt_path, cfg):
     full_dataset = PrecomposedAlignmentDataset(
         data_root=cfg.data.DATA_ROOT,
         max_negatives_per_positive=cfg.data.MAX_NEGATIVES_PER_POSITIVE,
+        min_negatives_per_positive=cfg.data.MIN_NEGATIVES_PER_POSITIVE,
         radius=cfg.data.RADIUS,
         threshold=cfg.data.THRESHOLD,
         debug_mode=cfg.data.DEBUG,

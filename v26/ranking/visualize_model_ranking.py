@@ -14,16 +14,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from skimage.transform import resize
+from config import ModelConfig
 from dataset_ranking import (
     PrecomposedAlignmentDataset,
     collate_alignment_samples,
 )
-from models_ranking import (
+from ranking.models_ranking import (
     BaselineScorer,
+    FiLMViTBlock,
     GeometricScorer,
     MultiModalScorerV2_Practical,
     MultiModalScorerWeightedViTFiLM,
 )
+from MoHE.models import RGBScorer
 from PIL import Image
 from sklearn.decomposition import PCA
 from torch.utils.data import DataLoader
@@ -34,15 +37,17 @@ def load_model(checkpoint_path, model_type, device="cuda"):
     Load a trained model from checkpoint.
     Handles both old checkpoints (with numpy) and new clean checkpoints.
     """
+    cfg = ModelConfig()
+
     # Initialize model
-    if model_type == "baseline":
-        model = BaselineScorer()
+    if model_type == "baseline" or model_type == 'RGB':
+        model = RGBScorer()
     elif model_type == "geometric":
         model = GeometricScorer()
     elif model_type == "multimodal":
-        model = MultiModalScorerV2_Practical()
+        model = MultiModalScorerV2_Practical(dino_model=cfg.DINO_MODEL)
     elif model_type == "film":
-        model = MultiModalScorerWeightedViTFiLM()
+        model = MultiModalScorerWeightedViTFiLM(dino_model=cfg.DINO_MODEL)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -110,7 +115,7 @@ def extract_attention_maps(model, rgb, rgb_geometric, model_type="geometric"):
     """
     model.eval()
 
-    if model_type == "baseline":
+    if model_type == "baseline" or model_type == 'RGB':
         vit_model = model.vit
     elif model_type == "geometric":
         vit_model = model.vit
@@ -128,8 +133,8 @@ def extract_attention_maps(model, rgb, rgb_geometric, model_type="geometric"):
             vit_input = model.projection(rgb_geometric)
         else:
             vit_input = rgb_geometric[:, :3]  # Just take RGB if no projection
-    elif model_type == "multimodal":
-        # Multimodal processes geometric features first
+    elif model_type in ("multimodal", "film"):
+        # These models process geometric features first
         with torch.no_grad():
             rgb_only = rgb_geometric[:, :3]
             geom_only = rgb_geometric[:, 3:]
@@ -137,23 +142,40 @@ def extract_attention_maps(model, rgb, rgb_geometric, model_type="geometric"):
             combined_input = torch.cat([rgb_only, geom_encoded], dim=1)
             vit_input = model.rgb_geom_fusion(combined_input)
 
-    # *** KEY CHANGE: Request attention outputs ***
+    # This transformers version's ViTEncoder does not propagate output_attentions,
+    # so we capture attention via a forward hook on the last layer's self-attention.
+    last_layer = vit_model.encoder.layer[-1]
+    if isinstance(last_layer, FiLMViTBlock):
+        attn_module = last_layer.block.attention.attention
+    else:
+        attn_module = last_layer.attention.attention
+
+    # Switch to eager attention so attention_probs is materialized (SDPA returns None)
+    old_attn_impl = vit_model.config._attn_implementation
+    vit_model.config._attn_implementation = "eager"
+
+    captured = []
+
+    def hook(_m, _i, output):
+        captured.append(output[1].detach())
+
+    handle = attn_module.register_forward_hook(hook)
+
     with torch.no_grad():
-        outputs = vit_model(vit_input, output_attentions=True)
+        vit_model(vit_input)
 
-    # outputs.attentions is a tuple of attention tensors, one per layer
-    # Each has shape: (batch_size, num_heads, sequence_length, sequence_length)
+    handle.remove()
+    vit_model.config._attn_implementation = old_attn_impl
 
-    if not hasattr(outputs, "attentions") or outputs.attentions is None:
-        print("⚠️  Warning: Model did not output attentions!")
+    if not captured:
+        print("⚠️  Warning: No attention captured!")
         B = rgb.shape[0]
         return torch.zeros(B, 14, 14, device=rgb.device)
 
-    # Get attention from LAST layer
-    last_layer_attn = outputs.attentions[-1]  # (B, num_heads, seq_len, seq_len)
+    attention_probs = captured[0]  # (B, num_heads, seq_len, seq_len)
 
     # Average over attention heads
-    attn = last_layer_attn.mean(dim=1)  # (B, seq_len, seq_len)
+    attn = attention_probs.mean(dim=1)  # (B, seq_len, seq_len)
 
     # Get attention from CLS token (index 0) to all patch tokens (index 1:)
     cls_attn = attn[:, 0, 1:]  # (B, num_patches)
@@ -330,7 +352,7 @@ def visualize_batch(
 
     # Get predictions
     with torch.no_grad():
-        if model_type == "baseline":
+        if model_type == "baseline" or model_type == 'RGB':
             scores = torch.sigmoid(model(rgb)).squeeze()
         elif model_type in ("multimodal", "film"):
             scores = torch.sigmoid(model(rgb, rgb_geometric)).squeeze()
@@ -659,7 +681,7 @@ def visualize_score_distribution(
             difficulties = batch["difficulties"]
 
             # Get predictions
-            if model_type == "multimodal":
+            if model_type in ("multimodal", "film"):
                 scores = model(rgb, rgb_geometric).squeeze()
             elif model_type == "geometric":
                 scores = model(rgb_geometric).squeeze()
@@ -782,7 +804,7 @@ def analyze_failures(
             group_sizes = batch["group_sizes"]
 
             # Get predictions
-            if model_type == "multimodal":
+            if model_type in ("multimodal", "film"):
                 scores = model(rgb, rgb_geometric).squeeze()
             elif model_type == "geometric":
                 scores = model(rgb_geometric).squeeze()
@@ -848,8 +870,11 @@ def main(args):
     full_dataset = PrecomposedAlignmentDataset(
         data_root=args.data_root,
         max_negatives_per_positive=12,
+        min_negatives_per_positive=4,
         radius=RADIUS,
         threshold=THRESHOLD,
+        limit_to_N=args.limit,
+        limit_by_num_pairs=False,
     )
 
     # Create dataloader
@@ -917,7 +942,7 @@ if __name__ == "__main__":
         "--model_type",
         type=str,
         required=True,
-        choices=["baseline", "geometric", "multimodal", "film"],
+        choices=["baseline", "RGB", "geometric", "multimodal", "film"],
         help="Type of model",
     )
     parser.add_argument("--data_root", type=str, default="./data", help="Path to data")
@@ -943,6 +968,8 @@ if __name__ == "__main__":
         action="store_true",
         help="Include DINO attention maps in visualizations",
     )
+
+    parser.add_argument("--limit", type=int, default=0, help='Limit dataset to N images')
 
     args = parser.parse_args()
     main(args)
