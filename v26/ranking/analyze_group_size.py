@@ -44,73 +44,27 @@ def extract_size(name):
     return m.group(1) if m else None
 
 
-def get_pair_key_parts(filename):
-    """Extract puzzle_id and sorted piece IDs from filename."""
-    name = filename.stem
-
-    PREFIX = (
-        r'^(\d+)'
-        r'__\w+__'
-        r'img__(\d+)'
-        r'__'
-        r'(.+?)'
-        r'__pmap__(\d+)'
-        r'__'
-        r'(\w+)'
-    )
-
-    PATTERN_VIS = re.compile(
-        PREFIX
-        + r'_vis_piece_(\d+)_piece_(\d+)'
-        + r'_([\d.]+)_([\d.]+)_([-\d.]+)'
-        + r'_(grid|wrong_\d+|gt)$'
-    )
-
-    PATTERN_VS = re.compile(
-        PREFIX
-        + r'_piece_(\d+)_vs_piece_(\d+)'
-        + r'_score(\d+)$'
-    )
-
-    m = PATTERN_VIS.match(name)
-    if m:
-        suffix = m.group(11)
-        if suffix == 'gt':
-            return None
-        cat = 'positive' if suffix == 'grid' else 'negative'
-        pieces = sorted([m.group(6), m.group(7)])
-        return {
-            'puzzle_id': m.group(1),
-            'piece1': pieces[0],
-            'piece2': pieces[1],
-            'category': cat,
-            'style': extract_style(name),
-            'size': extract_size(name),
-        }
-
-    m = PATTERN_VS.match(name)
-    if m:
-        pieces = sorted([m.group(6), m.group(7)])
-        return {
-            'puzzle_id': m.group(1),
-            'piece1': pieces[0],
-            'piece2': pieces[1],
-            'category': 'hard_negative',
-            'style': extract_style(name),
-            'size': extract_size(name),
-        }
-
-    return None
-
-
 def scan_groups(data_root, debug=False):
     """
-    Scan dataset and build group statistics.
+    Scan dataset using PrecomposedAlignmentDataset and build group statistics.
+
+    Uses the actual dataset class so statistics reflect the same filtering
+    (min_negatives, max_negatives, hard_negative_ratio, etc.) used during training.
 
     Returns:
         groups: dict {pair_key: {positive, negative, hard_negative, style, size}}
-        all_puzzle_ids: set of all puzzle IDs
     """
+    from dataset_ranking import PrecomposedAlignmentDataset
+
+    dataset = PrecomposedAlignmentDataset(
+        data_root=data_root,
+        max_negatives_per_positive=4,
+        min_negatives_per_positive=1,
+        radius=50,
+        threshold=50,
+        debug_mode=debug,
+    )
+
     groups = defaultdict(lambda: {
         'positive': 0,
         'negative': 0,
@@ -119,26 +73,31 @@ def scan_groups(data_root, debug=False):
         'size': None,
     })
 
-    for cat in ['positive', 'negative', 'hard_negative']:
-        images_dir = Path(data_root) / cat / 'images'
-        if not images_dir.exists():
+    for pair_key, pair_data in dataset.pairs.items():
+        n_pos = len(pair_data['positive'])
+        n_neg = len(pair_data['negative'])
+        n_hn = len(pair_data['hard_negative'])
+
+        if n_pos == 0 and n_neg == 0 and n_hn == 0:
             continue
 
-        png_files = list(images_dir.glob('*.png'))
-        if debug:
-            png_files = png_files[:1000]
+        d = groups[pair_key]
+        d['positive'] = n_pos
+        d['negative'] = n_neg
+        d['hard_negative'] = n_hn
 
-        for img_path in png_files:
-            parsed = get_pair_key_parts(img_path)
-            if not parsed:
-                continue
-
-            pair_key = f"{parsed['puzzle_id']}|{parsed['piece1']}|{parsed['piece2']}"
-            groups[pair_key][parsed['category']] += 1
-            if groups[pair_key]['style'] is None:
-                groups[pair_key]['style'] = parsed['style']
-            if groups[pair_key]['size'] is None:
-                groups[pair_key]['size'] = parsed['size']
+        # Extract style/size from the first sample's filename
+        for cat in ['positive', 'negative', 'hard_negative']:
+            samples = pair_data[cat]
+            if samples:
+                fname = Path(samples[0]['image_path']).name
+                style = extract_style(fname)
+                size = extract_size(fname)
+                if style:
+                    d['style'] = style
+                if size:
+                    d['size'] = size
+                break
 
     return groups
 

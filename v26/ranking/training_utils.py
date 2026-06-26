@@ -215,9 +215,6 @@ def plot_new_accuracy_metrics(history, save_path):
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Saved new accuracy metrics plot to {save_path}")
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Saved training history plot to {save_path}")
 
 
 def evaluate_ranking(model, dataloader, device, model_type='multimodal'):

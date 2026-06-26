@@ -31,6 +31,8 @@ from PIL import Image
 from sklearn.decomposition import PCA
 from torch.utils.data import DataLoader
 
+from training_utils import plot_training_history, plot_new_accuracy_metrics
+
 
 def load_model(checkpoint_path, model_type, device="cuda"):
     """
@@ -84,27 +86,8 @@ def load_model(checkpoint_path, model_type, device="cuda"):
 
     print(f"Loaded {model_type} model from {checkpoint_path}")
 
-    return model
-
-
-def denormalize_image(tensor):
-    """
-    Denormalize image tensor for visualization.
-
-    Args:
-        tensor: (C, H, W) normalized tensor
-
-    Returns:
-        image: (H, W, C) numpy array in [0, 1]
-    """
-    mean = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
-
-    img = tensor.permute(1, 2, 0).cpu().numpy()
-    img = img * std + mean
-    img = np.clip(img, 0, 1)
-
-    return img
+    history = checkpoint.get("history") if isinstance(checkpoint, dict) else None
+    return model, history
 
 
 def extract_attention_maps(model, rgb, rgb_geometric, model_type="geometric"):
@@ -324,7 +307,7 @@ def denormalize_image(tensor):
 
 
 def visualize_batch(
-    model, batch, device, save_dir, batch_idx=0, model_type="geometric", threshold=0.5, show_dino_attn=False
+    model, batch, device, save_dir, batch_idx=0, model_type="geometric", threshold=0.5, show_dino_attn=False, specific_group=None
 ):
     """
     Visualize predictions for one batch with attention maps.
@@ -381,6 +364,10 @@ def visualize_batch(
     start_idx = 0
     for group_idx, group_size in enumerate(group_sizes):
         end_idx = start_idx + group_size
+
+        if specific_group is not None and group_idx != specific_group:
+            start_idx = end_idx
+            continue
 
         # Extract this group
         group_indices = range(start_idx, end_idx)
@@ -845,10 +832,106 @@ def analyze_failures(
                         model_type=model_type,
                         threshold=threshold,
                         show_dino_attn=show_dino_attn,
+                        specific_group=group_idx,
                     )
                     failures_found += 1
 
     print(f"Found and visualized {failures_found} failure cases in {failure_dir}")
+
+
+def inspect_batch_channels(batch, save_path=None, max_groups=1, show=False, model=None, device=None, model_type="geometric"):
+    """
+    Visualize the composition of one or more groups in a batch,
+    showing all 6 rgb_geometric channels for each sample.
+
+    Channels: 0-2 = RGB, 3 = Proximity A, 4 = Proximity B, 5 = Contact
+
+    Args:
+        batch: Batch from DataLoader (dict with 'rgb', 'rgb_geometric', 'labels', ...)
+        save_path: Path to save the figure (if None and show=False, does nothing)
+        max_groups: Maximum groups to visualize (default 1)
+        show: Whether to call plt.show() instead of saving
+        model: Optional model to compute scores inline
+        device: Device for model inference
+    """
+    rgb_geom = batch['rgb_geometric']
+    labels = batch['labels']
+    difficulties = batch['difficulties']
+    positions = batch['positions']
+    group_sizes = batch['group_sizes']
+    pair_keys = batch.get('pair_keys', [None] * len(group_sizes))
+
+    scores = None
+    if model is not None and device is not None:
+        with torch.no_grad():
+            rgb_in = batch['rgb'].to(device)
+            rg_in = rgb_geom.to(device)
+            if model_type in ("multimodal", "film"):
+                logits = model(rgb_in, rg_in).squeeze()
+            elif model_type == "geometric":
+                logits = model(rg_in).squeeze()
+            else:
+                logits = model(rgb_in).squeeze()
+            scores = torch.sigmoid(logits).cpu().numpy()
+
+    channel_names = ['RGB', 'Proximity A', 'Proximity B', 'Contact']
+    cmap_options = [None, 'viridis', 'viridis', 'hot']
+
+    start_idx = 0
+    for group_idx in range(min(max_groups, len(group_sizes))):
+        gs = group_sizes[group_idx]
+        end_idx = start_idx + gs
+        indices = range(start_idx, end_idx)
+
+        fig, axes = plt.subplots(gs, 4, figsize=(16, 3.5 * gs))
+        fig.suptitle(
+            f"Group {group_idx}  |  pair_key={pair_keys[group_idx] if group_idx < len(pair_keys) else '?'}  |  "
+            f"size={gs} samples",
+            fontsize=13, fontweight='bold', y=1.01,
+        )
+
+        if gs == 1:
+            axes = axes[np.newaxis, :]
+
+        for row, i in enumerate(indices):
+            # Determine label/color
+            label = labels[i].item()
+            title_color = 'green' if label == 1.0 else '#d62728'
+            is_bold = label == 1.0
+
+            # Col 0: RGB
+            img = denormalize_image(rgb_geom[i, :3])
+            axes[row, 0].imshow(img)
+            score_str = f"  score={scores[i]:.3f}" if scores is not None else ""
+            axes[row, 0].set_title(
+                f"label={int(label)}  pos={positions[i]}  {difficulties[i]}{score_str}",
+                color=title_color, fontweight='bold' if is_bold else 'normal', fontsize=9,
+            )
+            axes[row, 0].axis('off')
+
+            # Col 1-3: proximity_A, proximity_B, contact
+            for col in range(1, 4):
+                ch = col + 2  # channels 3, 4, 5
+                data = rgb_geom[i, ch].cpu().numpy()
+                axes[row, col].imshow(data, cmap=cmap_options[col], vmin=0, vmax=1)
+                axes[row, col].set_title(channel_names[col], fontsize=9)
+                axes[row, col].axis('off')
+
+        plt.tight_layout()
+
+        if show:
+            plt.show()
+        elif save_path is not None:
+            path = Path(save_path)
+            if max_groups > 1:
+                p = path.parent / f"{path.stem}_group{group_idx}{path.suffix}"
+            else:
+                p = path
+            plt.savefig(p, dpi=150, bbox_inches='tight')
+            print(f"Saved batch inspection to {p}")
+        plt.close()
+
+        start_idx = end_idx
 
 
 def main(args):
@@ -860,7 +943,14 @@ def main(args):
     print(f"Output directory: {output_dir}")
 
     # Load model
-    model = load_model(args.model, args.model_type, device)
+    model, history = load_model(args.model, args.model_type, device)
+
+    if history is not None:
+        print("\nGenerating accuracy plots from training history...")
+        plot_training_history(history, output_dir / "training_history.png")
+        plot_new_accuracy_metrics(history, output_dir / "accuracy_metrics.png")
+    else:
+        print("\nNo training history found in checkpoint — skipping accuracy plots")
 
     # DATASET PARAMETERS
     RADIUS = 50
@@ -874,7 +964,7 @@ def main(args):
         radius=RADIUS,
         threshold=THRESHOLD,
         limit_to_N=args.limit,
-        limit_by_num_pairs=False,
+        limit_by_num_pairs=True,
     )
 
     # Create dataloader
@@ -893,6 +983,14 @@ def main(args):
     for batch_idx, batch in enumerate(dataloader):
         if batch_idx >= args.num_batches:
             break
+
+        if args.inspect_batch and batch_idx == 0:
+            print("\nInspecting first batch composition...")
+            save_path = output_dir / "batch_inspection.png" if not args.show_batch else None
+            inspect_batch_channels(
+                batch, save_path=save_path, max_groups=1, show=args.show_batch,
+                model=model, device=device, model_type=args.model_type,
+            )
 
         visualize_batch(
             model,
@@ -970,6 +1068,14 @@ if __name__ == "__main__":
     )
 
     parser.add_argument("--limit", type=int, default=0, help='Limit dataset to N images')
+    parser.add_argument(
+        "--inspect-batch", action="store_true",
+        help="Visualize first batch composition (all channels per sample)",
+    )
+    parser.add_argument(
+        "--show-batch", action="store_true",
+        help="When used with --inspect-batch, display the plot instead of saving to file",
+    )
 
     args = parser.parse_args()
     main(args)

@@ -13,9 +13,8 @@ class DataConfig:
     MAX_NEGATIVES_PER_POSITIVE: int = 16
     TRAIN_RATIO: float = 0.8
     SEED: int = 42
-    DEBUG: bool = False             # Limit dataset to 1000 images per category for fast testing
-    NUM_PAIRS_LIMIT: int = 5000     # Limit to N *pairs* (0 = use all data). Each pair = 1 positive + 4-16 negatives.
-    POSITIVE_RATIO: float = 0.1
+    DEBUG: bool = True             # Limit dataset to 200 images per category for fast testing
+    USE_GEOMETRIC: bool = False     # Include 3 geometric feature channels (proximity + contact)
     # Geometric feature computation
     RADIUS: int = 25
     THRESHOLD: int = 25
@@ -86,4 +85,4 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
-    name: str = "Option1_RGB"
+    name: str = "Option1_RGB_single_img"
