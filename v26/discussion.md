@@ -6,7 +6,7 @@ while the image of the two aligned pieces is an obvious choice, we need the opti
 Another idea is to use two separate networks with two purposes, one ViT for RGB images, and one CNN for geometric features, then merge them and check the cross-attention between them.
 
 ### How it works now
-![image](/v26/visualizations/input.jpg)
+![image](/v26/md_imgs/input.jpg)
 We have RGB image, and the possibiilty to include geometric features (3 channel as well, the first two are truncated SDF (proximity field if we want), the third one is the combination and have higher value close to the matching borders of the two pieces). 
 
 ### Code
@@ -17,7 +17,7 @@ In the code there is a [`RGBScorer`](/v26/single_image/models.py#L17) (ViT plus 
 Including context (in terms of multiple alignment of the same pair of pieces) is interesting, but it seems easier and more effective to build the network with one input (one image) and one output (the score) - but the batch should still contains (mostly or exclusively?) images of the same pair of pieces.
 
 ### How it works now
-![batch](/v26/visualizations/batch.jpg)
+![batch](/v26/md_imgs/batch.jpg)
 I started out with the single image, moved to the ranking (set of images, you can see here above) and now moved back to the single image (it convinces me more). The *images of the same pair* are found using regex on the filenames (which usually is something like `..puzzle__something___piece_A_vs_piece_B_x_y_theta_...`) and the idea is shared from both dataloaders. 
 
 ### Code
