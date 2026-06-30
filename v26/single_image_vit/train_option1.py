@@ -18,7 +18,7 @@ from rich.live import Live
 from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
 
-from single_image.dataset_single import SingleImageDataset
+from single_image.dataset_single import SingleImageDataset, SamePairBatchSampler
 from single_image.models import RGBScorer, GeometricScorer
 from single_image.config import Config
 
@@ -412,11 +412,20 @@ def main():
     parser = argparse.ArgumentParser(description="Train single-image scoring model")
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
+    parser.add_argument('--num-images', type=int, default=None,
+                        help='Override NUM_IMAGES (train images, 0=all, maintains ratio)')
+    parser.add_argument('--num-images-val', type=int, default=None,
+                        help='Override NUM_IMAGES_VAL (val images)')
     args = parser.parse_args()
 
     cfg = Config()
+    num_images = args.num_images if args.num_images is not None else cfg.data.NUM_IMAGES
+    num_images_val = args.num_images_val if args.num_images_val is not None else cfg.data.NUM_IMAGES_VAL
 
     print(f"Using device: {cfg.training.DEVICE}")
+    if num_images > 0:
+        print(f"Train: {num_images} images  Val: {num_images_val} images  "
+              f"({cfg.data.POSITIVE_RATIO:.0%} positive)")
 
     train_dataset, val_dataset = SingleImageDataset.create_puzzle_split(
         data_root=cfg.data.DATA_ROOT,
@@ -428,23 +437,41 @@ def main():
         debug=cfg.data.DEBUG,
         augment=cfg.augmentation.ENABLED,
         augment_cfg=cfg.augmentation,
+        num_images=num_images,
+        num_images_val=num_images_val,
+        positive_ratio=cfg.data.POSITIVE_RATIO,
     )
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=cfg.training.BATCH_SIZE,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=cfg.training.BATCH_SIZE,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-    )
+    if cfg.data.SAME_PAIR_BATCH:
+        if not cfg.augmentation.ENABLED:
+            print("[yellow]same_pair_batch=True — enabling augmentation for variability[/]")
+            cfg.augmentation.ENABLED = True
+            train_dataset.augment = True
+            train_dataset.color_augment = train_dataset._build_color_augment()
+            val_dataset.augment = False  # keep val deterministic
+        batch_size = cfg.training.BATCH_SIZE
+        train_sampler = SamePairBatchSampler(train_dataset, batch_size, shuffle=True)
+        val_sampler = SamePairBatchSampler(val_dataset, batch_size, shuffle=False)
+        train_loader = DataLoader(train_dataset, batch_sampler=train_sampler,
+                                  num_workers=4, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_sampler=val_sampler,
+                                num_workers=4, pin_memory=True)
+        print(f"Using same-pair batching ({len(train_sampler)} train / {len(val_sampler)} val batches)")
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=cfg.training.BATCH_SIZE,
+            shuffle=True,
+            num_workers=4,
+            pin_memory=True,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=cfg.training.BATCH_SIZE,
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True,
+        )
 
     print(f"\n=== Dataset Ready ===")
     print(f"Train: {len(train_dataset)} images")

@@ -7,7 +7,7 @@ Supports optional geometric features (proximity + contact channels).
 """
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 import numpy as np
 from PIL import Image
 from pathlib import Path
@@ -16,6 +16,48 @@ import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
 import re
 import random
+
+# ============================================================================
+# Same-Pair Batch Sampler
+# ============================================================================
+
+class SamePairBatchSampler(Sampler):
+    """Yields one batch per pair_key. For small groups (< batch_size), cycles
+    indices with repetition to fill the batch. For large groups, selects a
+    random subset of batch_size indices each epoch."""
+    def __init__(self, dataset, batch_size, shuffle=True, seed=42):
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.seed = seed
+        self.rng = random.Random(seed)
+        # Group valid indices by pair_key
+        groups = {}
+        for idx, s in enumerate(dataset.samples):
+            pk = s.get('pair_key')
+            if pk is None:
+                continue
+            groups.setdefault(pk, []).append(idx)
+        self.groups = list(groups.values())
+        # Sort groups for deterministic order when shuffle=False
+        self.groups.sort(key=lambda g: min(g))
+
+    def __iter__(self):
+        if self.shuffle:
+            self.rng.shuffle(self.groups)
+        batches = []
+        for group in self.groups:
+            n = len(group)
+            if n >= self.batch_size:
+                batch = self.rng.sample(group, self.batch_size)
+            else:
+                k = -(-self.batch_size // n)  # ceil division
+                batch = (group * k)[:self.batch_size]
+            batches.append(batch)
+        return iter(batches)
+
+    def __len__(self):
+        return len(self.groups)
+
 
 # ============================================================================
 # Filename Parsing Utilities
@@ -186,7 +228,8 @@ class SingleImageDataset(Dataset):
 
     def __init__(self, data_root, use_geometric=False, radius=25, threshold=25,
                  transform=None, debug=False, limit=0, puzzle_ids=None,
-                 augment=False, augment_cfg=None):
+                 augment=False, augment_cfg=None,
+                 num_images=0, positive_ratio=0.1):
         self.data_root = Path(data_root)
         self.use_geometric = use_geometric
         self.radius = radius
@@ -196,6 +239,8 @@ class SingleImageDataset(Dataset):
         self.puzzle_ids = puzzle_ids
         self.augment = augment
         self.augment_cfg = augment_cfg
+        self.num_images = num_images
+        self.positive_ratio = positive_ratio
 
         self.transform = transform or transforms.Compose([
             transforms.Resize((224, 224)),
@@ -204,26 +249,29 @@ class SingleImageDataset(Dataset):
                                 std=[0.229, 0.224, 0.225])
         ])
 
-        self.color_augment = None
-        if self.augment and self.augment_cfg is not None:
-            aug_list = []
-            cfg = self.augment_cfg
-            if cfg.COLOR_JITTER:
-                aug_list.append(transforms.ColorJitter(
-                    cfg.COLOR_JITTER_BRIGHTNESS, cfg.COLOR_JITTER_CONTRAST,
-                    cfg.COLOR_JITTER_SATURATION, cfg.COLOR_JITTER_HUE,
-                ))
-            if cfg.GAUSSIAN_BLUR:
-                aug_list.append(transforms.RandomApply(
-                    [transforms.GaussianBlur(cfg.GAUSSIAN_BLUR_KERNEL_SIZE)],
-                    p=cfg.GAUSSIAN_BLUR_PROB,
-                ))
-            if cfg.RANDOM_GRAYSCALE:
-                aug_list.append(transforms.RandomGrayscale(p=cfg.RANDOM_GRAYSCALE_PROB))
-            self.color_augment = transforms.Compose(aug_list) if aug_list else None
+        self.color_augment = self._build_color_augment()
 
         self.samples = self._scan_files()
         self._print_statistics()
+
+    def _build_color_augment(self):
+        if not self.augment or self.augment_cfg is None:
+            return None
+        aug_list = []
+        cfg = self.augment_cfg
+        if cfg.COLOR_JITTER:
+            aug_list.append(transforms.ColorJitter(
+                cfg.COLOR_JITTER_BRIGHTNESS, cfg.COLOR_JITTER_CONTRAST,
+                cfg.COLOR_JITTER_SATURATION, cfg.COLOR_JITTER_HUE,
+            ))
+        if cfg.GAUSSIAN_BLUR:
+            aug_list.append(transforms.RandomApply(
+                [transforms.GaussianBlur(cfg.GAUSSIAN_BLUR_KERNEL_SIZE)],
+                p=cfg.GAUSSIAN_BLUR_PROB,
+            ))
+        if cfg.RANDOM_GRAYSCALE:
+            aug_list.append(transforms.RandomGrayscale(p=cfg.RANDOM_GRAYSCALE_PROB))
+        return transforms.Compose(aug_list) if aug_list else None
 
     def _scan_files(self):
         samples = []
@@ -235,6 +283,7 @@ class SingleImageDataset(Dataset):
 
             png_files = list(images_dir.glob('*.png'))
             if self.debug:
+                random.Random(42).shuffle(png_files)
                 png_files = png_files[:200]
 
             for img_path in png_files:
@@ -266,7 +315,21 @@ class SingleImageDataset(Dataset):
         if self.puzzle_ids is not None:
             samples = [s for s in samples if s['puzzle_id'] in self.puzzle_ids]
 
-        if self.limit > 0 and len(samples) > self.limit:
+        if self.num_images > 0 and len(samples) > self.num_images:
+            # Stratified sampling preserving positive ratio
+            pos = [s for s in samples if s['label'] == 1.0]
+            neg = [s for s in samples if s['label'] == 0.0]
+            target_pos = min(int(self.num_images * self.positive_ratio), len(pos))
+            target_neg = min(self.num_images - target_pos, len(neg))
+            # If one group is too small, compensate from the other
+            if len(pos) < target_pos:
+                target_neg = min(self.num_images - len(pos), len(neg))
+            if len(neg) < target_neg:
+                target_pos = min(self.num_images - len(neg), len(pos))
+            random.Random(42).shuffle(pos)
+            random.Random(42).shuffle(neg)
+            samples = pos[:target_pos] + neg[:target_neg]
+        elif self.limit > 0 and len(samples) > self.limit:
             random.Random(42).shuffle(samples)
             samples = samples[:self.limit]
 
@@ -276,7 +339,8 @@ class SingleImageDataset(Dataset):
         n_pos = sum(1 for s in self.samples if s['label'] == 1.0)
         n_neg = sum(1 for s in self.samples if s['label'] == 0.0)
         unique_pairs = len(set(s['pair_key'] for s in self.samples if s['pair_key']))
-        print(f"\nSingleImageDataset: {len(self.samples)} images")
+        total_str = f" (stratified to {self.num_images})" if self.num_images > 0 else ""
+        print(f"\nSingleImageDataset: {len(self.samples)} images{total_str}")
         print(f"  Positives: {n_pos}  Negatives: {n_neg}  (ratio 1:{n_neg / max(n_pos, 1):.1f})")
         print(f"  Unique pairs: {unique_pairs}")
 
@@ -346,7 +410,9 @@ class SingleImageDataset(Dataset):
         return rgb_pil, geometric_np
 
     @classmethod
-    def create_puzzle_split(cls, data_root, train_ratio=0.8, seed=42, **kwargs):
+    def create_puzzle_split(cls, data_root, train_ratio=0.8, seed=42,
+                            num_images_val=20000, **kwargs):
+        # Full dataset with stratified sampling determines puzzle-level split.
         full = cls(data_root, **kwargs)
         puzzles = sorted(set(s['puzzle_id'] for s in full.samples if s['puzzle_id']))
         random.Random(seed).shuffle(puzzles)
@@ -354,6 +420,10 @@ class SingleImageDataset(Dataset):
         train_puzzles = set(puzzles[:n_train])
         val_puzzles = set(puzzles[n_train:])
         print(f"Split: {len(train_puzzles)} train / {len(val_puzzles)} val puzzles")
+        # Train uses the same num_images as the full dataset (from kwargs)
         train_ds = cls(data_root, puzzle_ids=train_puzzles, **kwargs)
-        val_ds = cls(data_root, puzzle_ids=val_puzzles, **kwargs)
+        # Val overrides num_images to a smaller value
+        val_kwargs = dict(kwargs)
+        val_kwargs['num_images'] = num_images_val
+        val_ds = cls(data_root, puzzle_ids=val_puzzles, **val_kwargs)
         return train_ds, val_ds

@@ -13,8 +13,12 @@ class DataConfig:
     MAX_NEGATIVES_PER_POSITIVE: int = 16
     TRAIN_RATIO: float = 0.8
     SEED: int = 42
-    DEBUG: bool = True             # Limit dataset to 200 images per category for fast testing
+    DEBUG: bool = False             # Limit dataset to 200 images per category for fast testing
     USE_GEOMETRIC: bool = False     # Include 3 geometric feature channels (proximity + contact)
+    NUM_IMAGES: int = 200000         # Training images (0 = all); preserves positive/negative ratio
+    NUM_IMAGES_VAL: int = 20000      # Validation images
+    POSITIVE_RATIO: float = 0.07     # Fraction of positives when NUM_IMAGES > 0
+    SAME_PAIR_BATCH: bool = False     # Each batch contains images from one pair only
     # Geometric feature computation
     RADIUS: int = 25
     THRESHOLD: int = 25
@@ -36,13 +40,13 @@ class ModelConfig:
 
 @dataclass
 class TrainingConfig:
-    BATCH_SIZE: int = 32
-    NUM_EPOCHS: int = 25
+    BATCH_SIZE: int = 128
+    NUM_EPOCHS: int = 20
     LEARNING_RATE: float = 1e-4
     WEIGHT_DECAY: float = 1e-4
     EARLY_STOPPING_PATIENCE: int = 5
     GRAD_CLIP_MAX_NORM: float = 1.0
-    BCE_POS_WEIGHT: float = 4.0
+    BCE_POS_WEIGHT: float = 5.0
     DEVICE: str = field(default_factory=lambda: "cuda" if __import__("torch").cuda.is_available() else "cpu")
 
 
@@ -85,4 +89,4 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
-    name: str = "Option1_RGB_single_img"
+    name: str = "Option1_RGB_single_img_b128"
