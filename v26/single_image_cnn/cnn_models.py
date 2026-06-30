@@ -198,4 +198,36 @@ class GuidanceGatedConv2d(nn.Module):
         gate      = torch.sigmoid(self.gate_conv(gate_in))
         return features * gate
 
-        
+
+class PuzzleScorer(nn.Module):
+    """
+    Wrapper around PuzzleStream that exposes a simple (B, C, H, W) → (B,) interface
+    compatible with the shared training loop. Handles rgb_geometric splitting
+    internally: feeds RGB channels 0-2 to PuzzleStream and contact channel 5 as
+    the guidance map.
+    """
+    def __init__(self, use_geom=True, dropout=0.5):
+        super().__init__()
+        self.backbone = PuzzleStream()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(256, 1),
+        )
+        self.use_geom = use_geom
+
+    def forward(self, x):
+        B = x.shape[0]
+        if self.use_geom and x.shape[1] > 3:
+            rgb = x[:, :3]
+            contact = x[:, 5:6]
+        else:
+            rgb = x[:, :3] if x.shape[1] > 3 else x
+            contact = torch.zeros(B, 1, x.shape[2], x.shape[3], device=x.device)
+        # PuzzleStream forward: (rgb, contact_map) -> features
+        f = self.backbone.stem(rgb)
+        f = self.backbone.block1(f, contact)
+        f = torch.nn.functional.max_pool2d(f, 2)
+        f = self.backbone.block2(f, contact)
+        f = self.pool(f).flatten(1)
+        return self.classifier(f).squeeze()

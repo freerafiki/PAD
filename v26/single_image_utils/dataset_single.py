@@ -17,9 +17,6 @@ import torchvision.transforms.functional as TF
 import re
 import random
 
-# ============================================================================
-# Same-Pair Batch Sampler
-# ============================================================================
 
 class SamePairBatchSampler(Sampler):
     """Yields one batch per pair_key. For small groups (< batch_size), cycles
@@ -30,7 +27,6 @@ class SamePairBatchSampler(Sampler):
         self.shuffle = shuffle
         self.seed = seed
         self.rng = random.Random(seed)
-        # Group valid indices by pair_key
         groups = {}
         for idx, s in enumerate(dataset.samples):
             pk = s.get('pair_key')
@@ -38,7 +34,6 @@ class SamePairBatchSampler(Sampler):
                 continue
             groups.setdefault(pk, []).append(idx)
         self.groups = list(groups.values())
-        # Sort groups for deterministic order when shuffle=False
         self.groups.sort(key=lambda g: min(g))
 
     def __iter__(self):
@@ -50,7 +45,7 @@ class SamePairBatchSampler(Sampler):
             if n >= self.batch_size:
                 batch = self.rng.sample(group, self.batch_size)
             else:
-                k = -(-self.batch_size // n)  # ceil division
+                k = -(-self.batch_size // n)
                 batch = (group * k)[:self.batch_size]
             batches.append(batch)
         return iter(batches)
@@ -58,10 +53,6 @@ class SamePairBatchSampler(Sampler):
     def __len__(self):
         return len(self.groups)
 
-
-# ============================================================================
-# Filename Parsing Utilities
-# ============================================================================
 
 def parse_filename(filename, dataset_name='wikiart'):
     basename = Path(filename).stem
@@ -147,10 +138,6 @@ def get_difficulty_score(filename):
     return int(match.group(1)) if match else None
 
 
-# ============================================================================
-# Geometric Feature Computation (standalone)
-# ============================================================================
-
 def compute_proximity_inclusive(mask, other_mask, radius):
     from scipy.ndimage import distance_transform_edt
 
@@ -209,10 +196,6 @@ def create_geometric_features(mask_array, radius, threshold):
 
     return np.stack([proximity_A, proximity_B, contact_strength], axis=0).astype(np.float32)
 
-
-# ============================================================================
-# Dataset Class
-# ============================================================================
 
 class SingleImageDataset(Dataset):
     """
@@ -316,12 +299,10 @@ class SingleImageDataset(Dataset):
             samples = [s for s in samples if s['puzzle_id'] in self.puzzle_ids]
 
         if self.num_images > 0 and len(samples) > self.num_images:
-            # Stratified sampling preserving positive ratio
             pos = [s for s in samples if s['label'] == 1.0]
             neg = [s for s in samples if s['label'] == 0.0]
             target_pos = min(int(self.num_images * self.positive_ratio), len(pos))
             target_neg = min(self.num_images - target_pos, len(neg))
-            # If one group is too small, compensate from the other
             if len(pos) < target_pos:
                 target_neg = min(self.num_images - len(pos), len(neg))
             if len(neg) < target_neg:
@@ -350,12 +331,10 @@ class SingleImageDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
 
-        # Load RGB
         rgb_image = Image.open(sample['image_path']).convert('RGB')
         rgb_resized = rgb_image.resize((224, 224), Image.BILINEAR)
 
         if self.use_geometric:
-            # Load mask and compute geometric features
             mask_image = Image.open(sample['mask_path']).convert('L')
             orig_w, orig_h = mask_image.size
             scale = 224.0 / max(orig_w, orig_h)
@@ -367,17 +346,11 @@ class SingleImageDataset(Dataset):
         else:
             geometric = np.zeros((3, 224, 224), dtype=np.float32)
 
-        # Apply spatial augmentation to both RGB and geometric
         if self.augment and self.augment_cfg is not None and self.augment_cfg.ENABLED:
             rgb_resized, geometric = self._apply_augmentation(rgb_resized, geometric)
 
-        # Transform RGB
         rgb_tensor = self.transform(rgb_resized)
-
-        # Convert geometric to tensor
         geometric_tensor = torch.from_numpy(geometric).float()
-
-        # Combine
         rgb_geometric = torch.cat([rgb_tensor, geometric_tensor], dim=0)
 
         return {
@@ -412,7 +385,6 @@ class SingleImageDataset(Dataset):
     @classmethod
     def create_puzzle_split(cls, data_root, train_ratio=0.8, seed=42,
                             num_images_val=20000, **kwargs):
-        # Full dataset with stratified sampling determines puzzle-level split.
         full = cls(data_root, **kwargs)
         puzzles = sorted(set(s['puzzle_id'] for s in full.samples if s['puzzle_id']))
         random.Random(seed).shuffle(puzzles)
@@ -420,9 +392,7 @@ class SingleImageDataset(Dataset):
         train_puzzles = set(puzzles[:n_train])
         val_puzzles = set(puzzles[n_train:])
         print(f"Split: {len(train_puzzles)} train / {len(val_puzzles)} val puzzles")
-        # Train uses the same num_images as the full dataset (from kwargs)
         train_ds = cls(data_root, puzzle_ids=train_puzzles, **kwargs)
-        # Val overrides num_images to a smaller value
         val_kwargs = dict(kwargs)
         val_kwargs['num_images'] = num_images_val
         val_ds = cls(data_root, puzzle_ids=val_puzzles, **val_kwargs)

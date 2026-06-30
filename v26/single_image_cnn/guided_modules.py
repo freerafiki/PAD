@@ -62,7 +62,7 @@ class SPADE(nn.Module):
         self,
         norm_nc: int,
         guidance_nc: int = 1,
-        norm_type: str = "group",
+        norm_type: str = "instance",   # 'batch' | 'instance' | 'group'
         num_groups: int = 32,
         hidden_nc: int = 64,
     ):
@@ -71,6 +71,7 @@ class SPADE(nn.Module):
         if norm_type == "group":
             # Batch-size independent; best for discriminative encoders.
             # Falls back gracefully when norm_nc < num_groups.
+            # num_groups=32 is standard; norm_nc must be divisible by num_groups
             g = min(num_groups, norm_nc)
             assert norm_nc % g == 0, (
                 f"norm_nc ({norm_nc}) must be divisible by num_groups ({g}). "
@@ -81,11 +82,13 @@ class SPADE(nn.Module):
         elif norm_type == "instance":
             # Per-sample, no cross-sample mixing → cleanest for per-sample guidance.
             # Slightly weaker discriminative statistics than BN/GN.
+            # Best for SPADE
             self.norm = nn.InstanceNorm2d(norm_nc, affine=False)
 
         elif norm_type == "batch":
-            # Requires batch >= ~32 for stable statistics.
-            # Conceptually fights per-sample SPADE conditioning at small batches.
+            # Requires large batch >= ~32 for stable statistics.
+            # Conceptually fights per-sample SPADE conditioning at small batches,
+            # but offers strongest discriminative statistics
             # Use only if batch size is reliably large (>= 32) and GroupNorm
             # underperforms in ablations.
             self.norm = nn.BatchNorm2d(norm_nc, affine=False)
@@ -201,12 +204,37 @@ class GuidanceGatedConv2d(nn.Module):
 
         return features * gate
 
+# ---------------------------------------------------------------------------
+# Adapted from Yu et al., ICCV 2019 — Free-Form Image Inpainting with Gated Convolution
+# Reference impl: github.com/avalonstrel/GatedConvolution_pytorch
+# ---------------------------------------------------------------------------
+
+class GatedConv2d(nn.Module):
+    """
+    Standard gated convolution (Yu et al. 2019).
+    Gate is computed from the input features alone — the original formulation.
+    """
+    def __init__(self, in_nc, out_nc, kernel_size=3, stride=1,
+                 padding=1, dilation=1, activation=nn.ELU(inplace=True)):
+        super().__init__()
+        self.feature_conv = nn.Conv2d(in_nc, out_nc, kernel_size,
+                                      stride, padding, dilation)
+        self.gate_conv    = nn.Conv2d(in_nc, out_nc, kernel_size,
+                                      stride, padding, dilation)
+        self.activation   = activation
+
+    def forward(self, x):
+        features = self.activation(self.feature_conv(x))
+        gate     = torch.sigmoid(self.gate_conv(x))
+        return features * gate
+
+
 
 # ---------------------------------------------------------------------------
-# Minimal example: how to use both modules in a ResNet-style encoder
+# Minimal example: how to use the modules in a ResNet-style encoder
 # ---------------------------------------------------------------------------
 
-class GatedResBlock(nn.Module):
+class GuidanceGatedResBlock(nn.Module):
     """
     Standard ResBlock where Conv2d → BN → ReLU is replaced with
     GuidanceGatedConv2d, letting the contact-region map gate each convolution.
@@ -217,6 +245,23 @@ class GatedResBlock(nn.Module):
         self.gconv1 = GuidanceGatedConv2d(nc, nc, guidance_nc)
         self.bn1    = nn.BatchNorm2d(nc)
         self.gconv2 = GuidanceGatedConv2d(nc, nc, guidance_nc)
+        self.bn2    = nn.BatchNorm2d(nc)
+
+    def forward(self, x, guidance):
+        h = self.bn1(self.gconv1(x, guidance))
+        h = self.bn2(self.gconv2(h, guidance))
+        return x + h
+
+
+class GatedResBlock(nn.Module):
+    """
+    Same as above, but standard gated, not guidance gated
+    """
+    def __init__(self, nc: int, guidance_nc: int = 1):
+        super().__init__()
+        self.gconv1 = GatedConv2d(nc, nc, guidance_nc)
+        self.bn1    = nn.BatchNorm2d(nc)
+        self.gconv2 = GatedConv2d(nc, nc, guidance_nc)
         self.bn2    = nn.BatchNorm2d(nc)
 
     def forward(self, x, guidance):
@@ -245,60 +290,115 @@ class SPADEResBlock(nn.Module):
         return x + h
 
 
+# ---- Build a tiny dual-stream encoder (one stream shown) ----------------
+# Input: 3-channel RGB patch
+# Guidance: 1-channel contact region map, same spatial size as input
+class TinyPuzzleEncoder(nn.Module):
+    def __init__(self, use_spade: bool = False):
+        super().__init__()
+        Block = SPADEResBlock if use_spade else GatedResBlock
+        self.stem   = nn.Conv2d(3, 64, 7, stride=2, padding=3)  # 64×H/2×W/2
+        self.block1 = Block(64)
+        self.down1  = nn.Conv2d(64, 128, 3, stride=2, padding=1) # 128×H/4×W/4
+        self.block2 = Block(128)
+        self.pool   = nn.AdaptiveAvgPool2d(1)
+        self.head   = nn.Linear(128, 1)   # binary compatibility score
+
+    def forward(self, x, guidance):
+        f = F.relu(self.stem(x), inplace=True)
+        f = self.block1(f, guidance)
+        f = F.relu(self.down1(f), inplace=True)
+        f = self.block2(f, guidance)
+        return self.head(self.pool(f).flatten(1))
+
+
+
+# ---- PuzzleScorer Wrapper + PuzzleStream subclass ----------------
+# Alternative version to score the image
+# THis handles both RGB input and RGB + geom 
+# Input: 3-channel RGB patch
+# Guidance: 1-channel contact region map, same spatial size as input
+class PuzzleStream(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.stem  = nn.Conv2d(3, 64, 7, stride=2, padding=3)   # RGB in
+        self.block1 = SPADEResBlock(64,  128, guidance_nc=1)
+        self.block2 = SPADEResBlock(128, 256, guidance_nc=1)
+        self.pool   = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self, x, contact_map):
+        f = self.stem(x)
+        f = self.block1(f, contact_map)   # guidance auto-resized inside SPADE
+        f = F.max_pool2d(f, 2)
+        f = self.block2(f, contact_map)
+        return self.pool(f).flatten(1)
+
+class PuzzleScorer(nn.Module):
+    """
+    Wrapper around PuzzleStream that exposes a simple (B, C, H, W) → (B,) interface
+    compatible with the shared training loop. Handles rgb_geometric splitting
+    internally: feeds RGB channels 0-2 to PuzzleStream and contact channel 5 as
+    the guidance map.
+    """
+    def __init__(self, use_geom=True, dropout=0.5):
+        super().__init__()
+        self.backbone = PuzzleStream()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(256, 1),
+        )
+        self.use_geom = use_geom
+
+    def forward(self, x):
+        B = x.shape[0]
+        if self.use_geom and x.shape[1] > 3:
+            rgb = x[:, :3]
+            contact = x[:, 5:6]
+        else:
+            rgb = x[:, :3] if x.shape[1] > 3 else x
+            contact = torch.zeros(B, 1, x.shape[2], x.shape[3], device=x.device)
+        # PuzzleStream forward: (rgb, contact_map) -> features
+        f = self.backbone.stem(rgb)
+        f = self.backbone.block1(f, contact)
+        f = torch.nn.functional.max_pool2d(f, 2)
+        f = self.backbone.block2(f, contact)
+        f = self.pool(f).flatten(1)
+        return self.classifier(f).squeeze()
+
+
 # ---------------------------------------------------------------------------
 # Minimal training loop sketch
 # ---------------------------------------------------------------------------
 
-def _training_loop_example():
-    """
-    Illustrates how guidance flows through the network during training.
-    Replace with your actual dataset, loss, and optimiser.
-    """
-    import torch.optim as optim
+# def _training_loop_example():
+#     """
+#     Illustrates how guidance flows through the network during training.
+#     Replace with your actual dataset, loss, and optimiser.
+#     """
+#     import torch.optim as optim
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ---- Build a tiny dual-stream encoder (one stream shown) ----------------
-    # Input: 3-channel RGB patch
-    # Guidance: 1-channel contact region map, same spatial size as input
+#     # ---- Instantiate --------------------------------------------------------
+#     model = TinyPuzzleEncoder(use_spade=False).to(device)   # swap to True for SPADE
+#     optimiser = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+#     loss_fn   = nn.BCEWithLogitsLoss()
 
-    class TinyPuzzleEncoder(nn.Module):
-        def __init__(self, use_spade: bool = False):
-            super().__init__()
-            Block = SPADEResBlock if use_spade else GatedResBlock
-            self.stem   = nn.Conv2d(3, 64, 7, stride=2, padding=3)  # 64×H/2×W/2
-            self.block1 = Block(64)
-            self.down1  = nn.Conv2d(64, 128, 3, stride=2, padding=1) # 128×H/4×W/4
-            self.block2 = Block(128)
-            self.pool   = nn.AdaptiveAvgPool2d(1)
-            self.head   = nn.Linear(128, 1)   # binary compatibility score
+#     # ---- One training step --------------------------------------------------
+#     B = 32
+#     x_a    = torch.randn(B, 3, 64, 64, device=device)  # piece A patch
+#     guide  = torch.rand( B, 1, 64, 64, device=device)  # contact region map [0,1]
+#     labels = torch.randint(0, 2, (B, 1), dtype=torch.float, device=device)
 
-        def forward(self, x, guidance):
-            f = F.relu(self.stem(x), inplace=True)
-            f = self.block1(f, guidance)
-            f = F.relu(self.down1(f), inplace=True)
-            f = self.block2(f, guidance)
-            return self.head(self.pool(f).flatten(1))
+#     optimiser.zero_grad()
+#     logits = model(x_a, guide)
+#     loss   = loss_fn(logits, labels)
+#     loss.backward()
+#     optimiser.step()
 
-    # ---- Instantiate --------------------------------------------------------
-    model = TinyPuzzleEncoder(use_spade=False).to(device)   # swap to True for SPADE
-    optimiser = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
-    loss_fn   = nn.BCEWithLogitsLoss()
-
-    # ---- One training step --------------------------------------------------
-    B = 32
-    x_a    = torch.randn(B, 3, 64, 64, device=device)  # piece A patch
-    guide  = torch.rand( B, 1, 64, 64, device=device)  # contact region map [0,1]
-    labels = torch.randint(0, 2, (B, 1), dtype=torch.float, device=device)
-
-    optimiser.zero_grad()
-    logits = model(x_a, guide)
-    loss   = loss_fn(logits, labels)
-    loss.backward()
-    optimiser.step()
-
-    print(f"loss={loss.item():.4f}  |  logits range [{logits.min():.2f}, {logits.max():.2f}]")
+#     print(f"loss={loss.item():.4f}  |  logits range [{logits.min():.2f}, {logits.max():.2f}]")
 
 
-if __name__ == "__main__":
-    _training_loop_example()
+# if __name__ == "__main__":
+#     _training_loop_example()
