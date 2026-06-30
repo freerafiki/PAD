@@ -9,12 +9,17 @@ We discussed three main possibilities to handle image/sample/batch creation:
 
 ## Option 1: RGB + ViT + BCE
 We train the ViT using RGB only (3 channel) images of A and B aligned, and as loss we use BCE. 
+The relative script is [`train_option1.py`](/v26/single_image_vit/train_option1.py)
 
 ## Option 2: RGB + Geom + ViT + BCE
 We train the ViT using RGB + Geom (6 channels: R, G, B, binary mask A, binary mask B, surface contact between A and B) and as loss we use BCE
 
 ## Option 3: RGB + Non-ViT Network (ResNet, Inception, MobileNetv3, ..) + BCE
-We train the network using RGB only but without the ViT, with a convolution-based network
+We train the network using RGB only but without the ViT, with a convolution-based network.
+Check the [`single_image_cnn` folder](/v26/single_image_cnn/README.md). Experimenting also with using the contact map as guidance for the network.
+
+## Evaluation:
+Evaluate the compatibility at matrix level. Not only image-wise (against target label), but also how far we are from the `ground truth` compatibility matrix (which we create from the ground truth puzzle before creating the pieces). 
 
 ## Bonus track: Split Network
 We pass the RGB through a ViT and the Geom channels through a CNN and we merge them later (+ MLP) to then score (0,1). We use cross-attention to *match* the attention of the geometric and color information of the two channels.
