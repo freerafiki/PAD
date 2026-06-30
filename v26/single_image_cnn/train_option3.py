@@ -13,7 +13,7 @@ from rich.console import Console
 
 from single_image_utils.dataset_single import SingleImageDataset, SamePairBatchSampler
 from single_image_utils.train_utils import train_model
-from single_image_cnn.cnn_models import PuzzleScorer
+from single_image_cnn.resnet_models import PairwiseCompatibilityDualModel, PairwiseCompatibilityModel
 from single_image_cnn.config_cnn import Config
 
 
@@ -100,7 +100,13 @@ def main():
     console.print(f"TRAINING: {'RGB+Geometric' if use_geom else 'RGB only'} + BCE")
     console.print(f"{'=' * 60}")
 
-    model = PuzzleScorer(use_geom=use_geom, dropout=cfg.model.DROPOUT)
+    if cfg.model.TYPE == 'single':
+        model = PairwiseCompatibilityModel()
+    elif cfg.model.TYPE == 'dual':
+        model = PairwiseCompatibilityModel(dropout=cfg.model.DROPOUT)
+    else:
+        raise NotImplementedError(f"Problem with model type: {cfg.model.TYPE} - check in the `config.py` file.")
+
 
     optimizer = optim.AdamW(
         model.parameters(),

@@ -25,11 +25,8 @@ class DataConfig:
 
 @dataclass
 class ModelConfig:
-    TYPE: str = 'puzzle'  # puzzle, gated, guidance_gated
+    TYPE: str = 'single'  # 'single' (pieces in the same image) or 'dual' (each piece its own RGB image)
     DROPOUT: float = 0.5
-    CNN_CHANNELS: int = 64
-    CNN_BLOCK_CHANNELS: tuple = (64, 128, 256)
-
 
 @dataclass
 class TrainingConfig:
@@ -82,4 +79,4 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
-    name: str = "Option3_CNN_single_img"
+    name: str = "Option3_CNN_RGB_single"

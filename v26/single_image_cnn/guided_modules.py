@@ -294,9 +294,14 @@ class SPADEResBlock(nn.Module):
 # Input: 3-channel RGB patch
 # Guidance: 1-channel contact region map, same spatial size as input
 class TinyPuzzleEncoder(nn.Module):
-    def __init__(self, use_spade: bool = False):
+    def __init__(self, block_type: str = 'GuidanceGated'):
         super().__init__()
-        Block = SPADEResBlock if use_spade else GatedResBlock
+        if block_type == 'GuidanceGated':
+            Block = GuidanceGatedResBlock
+        elif block_type == 'Gated':
+            Block = GatedResBlock
+        elif block_type == 'SPADE':
+            Block = SPADEResBlock
         self.stem   = nn.Conv2d(3, 64, 7, stride=2, padding=3)  # 64×H/2×W/2
         self.block1 = Block(64)
         self.down1  = nn.Conv2d(64, 128, 3, stride=2, padding=1) # 128×H/4×W/4
@@ -315,9 +320,7 @@ class TinyPuzzleEncoder(nn.Module):
 
 # ---- PuzzleScorer Wrapper + PuzzleStream subclass ----------------
 # Alternative version to score the image
-# THis handles both RGB input and RGB + geom 
-# Input: 3-channel RGB patch
-# Guidance: 1-channel contact region map, same spatial size as input
+# This handles both RGB input and RGB + geom input
 class PuzzleStream(nn.Module):
     def __init__(self):
         super().__init__()
