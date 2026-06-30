@@ -17,7 +17,7 @@ In the code there is a [`RGBScorer`](/v26/single_image/models.py#L17) (ViT plus 
 Including context (in terms of multiple alignment of the same pair of pieces) is interesting, but it seems easier and more effective to build the network with one input (one image) and one output (the score) - but the batch should still contains (mostly or exclusively?) images of the same pair of pieces.
 
 ### How it works now
-![batch](https://codeberg.org/rafiki/PAD/src/branch/main/v26/md_imgs/batch.jpg)
+![batch](/v26/md_imgs/batch.jpg)
 I started out with the single image, moved to the ranking (set of images, you can see here above) and now moved back to the single image (it convinces me more). The *images of the same pair* are found using regex on the filenames (which usually is something like `..puzzle__something___piece_A_vs_piece_B_x_y_theta_...`) and the idea is shared from both dataloaders. 
 
 ### Code

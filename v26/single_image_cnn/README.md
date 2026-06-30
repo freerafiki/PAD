@@ -1,3 +1,9 @@
+# Single Image with CNN
+
+Here the code to train CNN-based model on the single image classification task. 
+
+Beyond *standard* CNN, there is code to experiment with a *guidance map* (the contact region in our case), see below for more discussion.
+
 ## SPADE vs Guidance Gated Convolutions
 
 | | SPADE | Guidance Gated Conv2d |
