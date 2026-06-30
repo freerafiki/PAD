@@ -11,7 +11,8 @@ from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
 
 
-def evaluate_single_image(model, val_loader, criterion, device, use_geom=False):
+def evaluate_single_image(model, val_loader, criterion, device, use_geom=False,
+                          backbone="vit", split_pieces=False):
     model.eval()
     all_logits = []
     all_labels = []
@@ -28,10 +29,17 @@ def evaluate_single_image(model, val_loader, criterion, device, use_geom=False):
             categories = batch["category"]
             pair_keys = batch["pair_key"]
 
-            if use_geom:
-                logits = model(rgb_geometric).squeeze()
-            else:
-                logits = model(rgb).squeeze()
+            if backbone == 'vit':
+                if use_geom:
+                    logits = model(rgb_geometric).squeeze()
+                else:
+                    logits = model(rgb).squeeze()
+            elif backbone == 'resnet':
+                guidance_map = rgb_geometric[:, 5:6]
+                if split_pieces:
+                    raise NotImplementedError("split_pieces not implemented yet")
+                else:
+                    logits = model(rgb, guidance_map).squeeze()
 
             loss = criterion(logits, labels.squeeze())
             val_loss += loss.item()
@@ -193,8 +201,10 @@ def train_model(
     weight_decay=1e-4,
     device="cuda",
     use_geom=False,
+    split_pieces=False,
     save_dir="checkpoints",
     model_name="model",
+    backbone="vit",
     early_stopping_patience=5,
     max_norm=1.0,
     pos_weight_val_BCE=4.0,
@@ -295,10 +305,17 @@ def train_model(
 
                 optimizer.zero_grad()
 
-                if use_geom:
-                    logits = model(rgb_geometric).squeeze()
-                else:
-                    logits = model(rgb).squeeze()
+                if backbone == 'vit':
+                    if use_geom:
+                        logits = model(rgb_geometric).squeeze()
+                    else:
+                        logits = model(rgb).squeeze()
+                elif backbone == 'resnet':
+                    guidance_map = rgb_geometric[:, 5:6]
+                    if split_pieces:
+                        raise NotImplementedError("split_pieces not implemented yet")
+                    else:
+                        logits = model(rgb, guidance_map).squeeze()
 
                 loss = bce_criterion(logits, labels.squeeze())
 
@@ -316,7 +333,8 @@ def train_model(
             avg_train_loss = train_loss / num_batches
 
             eval_metrics = evaluate_single_image(
-                model, val_loader, bce_criterion, device, use_geom=use_geom
+                model, val_loader, bce_criterion, device, use_geom=use_geom,
+                backbone=backbone, split_pieces=split_pieces,
             )
 
             history["train_loss"].append(avg_train_loss)

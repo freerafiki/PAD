@@ -1,16 +1,139 @@
 import torchvision.models.resnet as tvresnet
 import torch, torch.nn as nn, torch.nn.functional as F
-from guided_modules import GuidanceGatedConv2d, SPADE
+
+
+
+##############################################
+#                                            #
+#  ███████╗██████╗  █████╗ ██████╗ ███████╗  #
+#  ██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔════╝  #
+#  ███████╗██████╔╝███████║██║  ██║█████╗    #
+#  ╚════██║██╔═══╝ ██╔══██║██║  ██║██╔══╝    #
+#  ███████║██║     ██║  ██║██████╔╝███████╗  #
+#  ╚══════╝╚═╝     ╚═╝  ╚═╝╚═════╝ ╚══════╝  #
+#                                            #
+##############################################
+# ---------------------------------------------------------------------------
+# SPADE — Spatially-Adaptive Normalization
+# ---------------------------------------------------------------------------
+
+class SPADE(nn.Module):
+    """
+    Spatially-Adaptive (De)Normalization layer.
+
+    Replaces the affine parameters of a normalization layer with spatially-
+    varying gamma and beta predicted from a guidance map. The base norm step
+    uses affine=False; ALL learned scale/shift comes from the guidance branch.
+
+    Args:
+        norm_nc      (int)  : channels in the feature map to be normalized.
+        guidance_nc  (int)  : channels in the guidance map (1 for a float mask).
+        norm_type    (str)  : 'group' (default) | 'instance' | 'batch'.
+                              'group' is recommended for discriminative encoders —
+                              batch-size independent and avoids cross-sample mixing.
+        num_groups   (int)  : groups for GroupNorm (only used if norm_type='group').
+                              norm_nc must be divisible by num_groups.
+        hidden_nc    (int)  : intermediate channels in the guidance MLP.
+
+    Forward:
+        x        : [B, norm_nc, H, W]  — feature map to modulate.
+        guidance : [B, guidance_nc, H_g, W_g]  — spatial guidance map.
+                   Resized bilinearly to (H, W) inside forward().
+    Returns:
+        [B, norm_nc, H, W]  — modulated feature map.
+
+    Usage note — (1 + gamma) vs gamma:
+        The implementation uses out = x_norm * (1 + gamma) + beta.
+        This is an initialisation trick confirmed by the original authors (issue #4):
+        since conv weights start near zero, gamma ≈ 0 → (1 + gamma) ≈ 1,
+        so SPADE is near-identity at init, which stabilises early training.
+        Mathematically equivalent to plain gamma once training begins.
+    """
+
+    def __init__(
+        self,
+        norm_nc: int,
+        guidance_nc: int = 1,
+        norm_type: str = "instance",   # 'batch' | 'instance' | 'group'
+        num_groups: int = 32,
+        hidden_nc: int = 64,
+    ):
+        super().__init__()
+
+        if norm_type == "group":
+            # Batch-size independent; best for discriminative encoders.
+            # Falls back gracefully when norm_nc < num_groups.
+            # num_groups=32 is standard; norm_nc must be divisible by num_groups
+            g = min(num_groups, norm_nc)
+            assert norm_nc % g == 0, (
+                f"norm_nc ({norm_nc}) must be divisible by num_groups ({g}). "
+                f"Try num_groups=16 or a power of 2 that divides norm_nc."
+            )
+            self.norm = nn.GroupNorm(g, norm_nc, affine=False)
+
+        elif norm_type == "instance":
+            # Per-sample, no cross-sample mixing → cleanest for per-sample guidance.
+            # Slightly weaker discriminative statistics than BN/GN.
+            # Best for SPADE
+            self.norm = nn.InstanceNorm2d(norm_nc, affine=False)
+
+        elif norm_type == "batch":
+            # Requires large batch >= ~32 for stable statistics.
+            # Conceptually fights per-sample SPADE conditioning at small batches,
+            # but offers strongest discriminative statistics
+            # Use only if batch size is reliably large (>= 32) and GroupNorm
+            # underperforms in ablations.
+            self.norm = nn.BatchNorm2d(norm_nc, affine=False)
+
+        else:
+            raise ValueError(
+                f"Unknown norm_type '{norm_type}'. Choose 'group', 'instance', or 'batch'."
+            )
+
+        # Lightweight guidance MLP: guidance_map → shared embedding → (gamma, beta)
+        # Two 3×3 convs; kernel size 3 preserves spatial structure at all resolutions.
+        self.mlp_shared = nn.Sequential(
+            nn.Conv2d(guidance_nc, hidden_nc, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.mlp_gamma = nn.Conv2d(hidden_nc, norm_nc, kernel_size=3, padding=1)
+        self.mlp_beta  = nn.Conv2d(hidden_nc, norm_nc, kernel_size=3, padding=1)
+
+    def forward(self, x: torch.Tensor, guidance: torch.Tensor) -> torch.Tensor:
+        # 1. Normalize (no learned affine — that comes entirely from guidance below)
+        x_norm = self.norm(x)
+
+        # 2. Resize guidance to match current feature spatial resolution
+        if guidance.shape[2:] != x.shape[2:]:
+            guidance = F.interpolate(
+                guidance, size=x.shape[2:], mode="bilinear", align_corners=False
+            )
+
+        # 3. Predict spatially-varying gamma and beta from guidance
+        shared = self.mlp_shared(guidance)
+        gamma  = self.mlp_gamma(shared)   # [B, norm_nc, H, W]
+        beta   = self.mlp_beta(shared)    # [B, norm_nc, H, W]
+
+        # 4. Modulate — (1 + gamma) initialises as near-identity; see docstring
+        return x_norm * (1.0 + gamma) + beta
+
+
+
 
 ##########################################################
 #                                                        #
+#   ██████╗  █████╗ ████████╗███████╗██████╗             #
+#  ██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝██╔══██╗            #
+#  ██║  ███╗███████║   ██║   █████╗  ██║  ██║            #
+#  ██║   ██║██╔══██║   ██║   ██╔══╝  ██║  ██║            #
+#  ╚██████╔╝██║  ██║   ██║   ███████╗██████╔╝            #
+#   ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═════╝             #
 #   ██████╗ ██████╗ ███╗   ██╗██╗   ██╗██████╗ ██████╗   #
 #  ██╔════╝██╔═══██╗████╗  ██║██║   ██║╚════██╗██╔══██╗  #
 #  ██║     ██║   ██║██╔██╗ ██║██║   ██║ █████╔╝██║  ██║  #
 #  ██║     ██║   ██║██║╚██╗██║╚██╗ ██╔╝██╔═══╝ ██║  ██║  #
 #  ╚██████╗╚██████╔╝██║ ╚████║ ╚████╔╝ ███████╗██████╔╝  #
 #   ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝  ╚═══╝  ╚══════╝╚═════╝   #
-#                                                        #
 #  ██████╗ ██╗      ██████╗  ██████╗██╗  ██╗███████╗     #
 #  ██╔══██╗██║     ██╔═══██╗██╔════╝██║ ██╔╝██╔════╝     #
 #  ██████╔╝██║     ██║   ██║██║     █████╔╝ ███████╗     #
@@ -330,7 +453,7 @@ class GuidedResNet(nn.Module):
 
         for m in self.modules():
             if isinstance(m, (GuidedBasicBlock, GuidedBottleneck)):
-                m.model_ref = self
+                object.__setattr__(m, 'model_ref', self)
 
     def _make_stage(self, block_cls, in_nc, planes, n_blocks, stride, gnc):
         out_nc = planes * block_cls.expansion
@@ -389,9 +512,11 @@ class PairwiseCompatibilityModel(nn.Module):
         x           : [B, 3, H, W]  — both pieces rendered on a single canvas
         contact_map : [B, 1, H, W]  — guidance, 0→ignore / 1→important
     """
-    def __init__(self, encoder: nn.Module):
+    def __init__(self, encoder: nn.Module = None):
         super().__init__()
-        self.encoder = encoder          # any GuidedResNet variant
+        if encoder is None:
+            encoder = GuidedResNet()
+        self.encoder = encoder
         self.head    = nn.Linear(encoder.embed_dim, 1)
 
     def forward(self, x, contact_map):
@@ -410,9 +535,11 @@ class PairwiseCompatibilityDualModel(nn.Module):
         patch_b     : [B, 3, H, W]
         contact_map : [B, 1, H, W]
     """
-    def __init__(self, encoder: nn.Module, dropout=0.3):
+    def __init__(self, encoder: nn.Module = None, dropout=0.3):
         super().__init__()
-        self.encoder = encoder          # shared weights — true Siamese
+        if encoder is None:
+            encoder = GuidedResNet()
+        self.encoder = encoder
         d = encoder.embed_dim
         self.head = nn.Sequential(
             nn.Linear(d * 3, 256),

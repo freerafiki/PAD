@@ -52,7 +52,8 @@ def visualize_score_distribution(all_samples, save_path):
 
 
 def visualize_predictions(groups, save_dir, max_groups=20, threshold=0.5,
-                          attn_maps_dict=None, geom_maps_dict=None):
+                          attn_maps_dict=None, geom_maps_dict=None,
+                          gradcam_maps_dict=None, gate_maps_dict=None):
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
 
@@ -66,6 +67,8 @@ def visualize_predictions(groups, save_dir, max_groups=20, threshold=0.5,
         return 2
 
     sorted_groups = sorted(groups.items(), key=group_rank_key)
+
+    cnn_mode = gate_maps_dict is not None
 
     vis_count = 0
     for pair_key, samples in sorted_groups:
@@ -82,15 +85,30 @@ def visualize_predictions(groups, save_dir, max_groups=20, threshold=0.5,
 
         attn_maps = attn_maps_dict.get(pair_key) if attn_maps_dict else None
         geom_maps = geom_maps_dict.get(pair_key) if geom_maps_dict else None
+        gradcam_maps = gradcam_maps_dict.get(pair_key) if gradcam_maps_dict else None
+        gate_maps = gate_maps_dict.get(pair_key) if gate_maps_dict else None
 
-        ncols = 5
-        fig, axes = plt.subplots(n, ncols, figsize=(ncols * 4, n * 4.5))
-        if n == 1:
-            axes = axes[np.newaxis, :]
+        if cnn_mode:
+            nrows = n * 2
+            ncols = 3
+            fig, axes = plt.subplots(nrows, ncols, figsize=(12, n * 8))
+            if nrows == 1:
+                axes = axes[np.newaxis, :]
+        else:
+            ncols = 5
+            fig, axes = plt.subplots(n, ncols, figsize=(ncols * 4, n * 4.5))
+            if n == 1:
+                axes = axes[np.newaxis, :]
+
         fig.suptitle(
             f"Group: {pair_key}  |  RankOK={ranking_ok}  FP={int(fp_count)}/{n}",
             fontsize=13, fontweight='bold', y=1.02,
         )
+
+        import matplotlib.cm as cm
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize
+        from skimage.transform import resize as sk_resize
 
         for i in range(n):
             correct = (scores_arr[i] > threshold) == (labels_arr[i] == 1.0)
@@ -99,43 +117,95 @@ def visualize_predictions(groups, save_dir, max_groups=20, threshold=0.5,
 
             img = denormalize_image(samples[i]['rgb'])
             title_rgb = _sample_title(labels_arr[i], scores_arr[i], threshold)
+            H, W = img.shape[:2]
 
-            axes[i, 0].imshow(img)
-            axes[i, 0].set_title(title_rgb, color=color, fontweight='bold', fontsize=10)
-            axes[i, 0].axis('off')
+            if cnn_mode:
+                # ——— Row 0: Image | Grad-CAM overlay | Gate map overlay ———
+                axes[i*2, 0].imshow(img)
+                axes[i*2, 0].set_title(title_rgb, color=color, fontweight='bold', fontsize=10)
+                axes[i*2, 0].axis('off')
 
-            img_attn = img.copy()
-            if attn_maps is not None:
-                from skimage.transform import resize as sk_resize
-                import matplotlib.cm as cm
-                H, W = img.shape[:2]
-                attn_resized = sk_resize(attn_maps[i], (H, W), order=3, preserve_range=True)
-                attn_norm = (attn_resized - attn_resized.min()) / (attn_resized.max() - attn_resized.min() + 1e-8)
-                heatmap = cm.jet(attn_norm)[:, :, :3]
-                img_attn = np.clip(0.6 * heatmap + 0.4 * img, 0, 1)
-            axes[i, 1].imshow(img_attn)
-            axes[i, 1].set_title("Overlay", color=color, fontweight='bold', fontsize=10)
-            axes[i, 1].axis('off')
+                img_gc = img.copy()
+                if gradcam_maps is not None:
+                    gc_resized = sk_resize(gradcam_maps[i], (H, W), order=3, preserve_range=True)
+                    gc_norm = (gc_resized - gc_resized.min()) / (gc_resized.max() - gc_resized.min() + 1e-8)
+                    heatmap_gc = cm.jet(gc_norm)[:, :, :3]
+                    img_gc = np.clip(0.6 * heatmap_gc + 0.4 * img, 0, 1)
+                axes[i*2, 1].imshow(img_gc)
+                axes[i*2, 1].set_title("Grad-CAM", color=color, fontweight='bold', fontsize=10)
+                axes[i*2, 1].axis('off')
+                sm_gc = ScalarMappable(cmap='jet', norm=Normalize(0, 1))
+                sm_gc.set_array([])
+                fig.colorbar(sm_gc, ax=axes[i*2, 1], fraction=0.046, pad=0.04, shrink=0.8)
 
-            if geom_maps:
-                axes[i, 2].imshow(geom_maps[i][0], cmap='viridis', vmin=0, vmax=1)
-            axes[i, 2].set_title("Prox A", color=color, fontweight='bold', fontsize=10)
-            axes[i, 2].axis('off')
+                img_gt = img.copy()
+                if gate_maps is not None:
+                    gt_resized = sk_resize(gate_maps[i], (H, W), order=3, preserve_range=True)
+                    heatmap_gt = cm.jet(gt_resized)[:, :, :3]
+                    img_gt = np.clip(0.6 * heatmap_gt + 0.4 * img, 0, 1)
+                axes[i*2, 2].imshow(img_gt)
+                axes[i*2, 2].set_title("Gate Map", color=color, fontweight='bold', fontsize=10)
+                axes[i*2, 2].axis('off')
+                sm_gt = ScalarMappable(cmap='jet', norm=Normalize(0, 1))
+                sm_gt.set_array([])
+                fig.colorbar(sm_gt, ax=axes[i*2, 2], fraction=0.046, pad=0.04, shrink=0.8)
 
-            if geom_maps:
-                axes[i, 3].imshow(geom_maps[i][1], cmap='viridis', vmin=0, vmax=1)
-            axes[i, 3].set_title("Prox B", color=color, fontweight='bold', fontsize=10)
-            axes[i, 3].axis('off')
+                # ——— Row 1: Prox A | Prox B | Contact ———
+                if geom_maps:
+                    axes[i*2+1, 0].imshow(geom_maps[i][0], cmap='viridis', vmin=0, vmax=1)
+                axes[i*2+1, 0].set_title("Prox A", color=color, fontweight='bold', fontsize=10)
+                axes[i*2+1, 0].axis('off')
 
-            if geom_maps:
-                axes[i, 4].imshow(geom_maps[i][2], cmap='hot', vmin=0, vmax=1)
-            axes[i, 4].set_title("Contact", color=color, fontweight='bold', fontsize=10)
-            axes[i, 4].axis('off')
+                if geom_maps:
+                    axes[i*2+1, 1].imshow(geom_maps[i][1], cmap='viridis', vmin=0, vmax=1)
+                axes[i*2+1, 1].set_title("Prox B", color=color, fontweight='bold', fontsize=10)
+                axes[i*2+1, 1].axis('off')
 
-            for col in range(ncols):
-                for spine in axes[i, col].spines.values():
-                    spine.set_color(color)
-                    spine.set_linewidth(lw)
+                if geom_maps:
+                    axes[i*2+1, 2].imshow(geom_maps[i][2], cmap='hot', vmin=0, vmax=1)
+                axes[i*2+1, 2].set_title("Contact", color=color, fontweight='bold', fontsize=10)
+                axes[i*2+1, 2].axis('off')
+
+                for row_off in range(2):
+                    for col_off in range(3):
+                        for spine in axes[i*2 + row_off, col_off].spines.values():
+                            spine.set_color(color)
+                            spine.set_linewidth(lw)
+            else:
+                # ——— 1×5 layout (ViT) ———
+                axes[i, 0].imshow(img)
+                axes[i, 0].set_title(title_rgb, color=color, fontweight='bold', fontsize=10)
+                axes[i, 0].axis('off')
+
+                img_attn = img.copy()
+                if attn_maps is not None:
+                    attn_resized = sk_resize(attn_maps[i], (H, W), order=3, preserve_range=True)
+                    attn_norm = (attn_resized - attn_resized.min()) / (attn_resized.max() - attn_resized.min() + 1e-8)
+                    heatmap = cm.jet(attn_norm)[:, :, :3]
+                    img_attn = np.clip(0.6 * heatmap + 0.4 * img, 0, 1)
+                axes[i, 1].imshow(img_attn)
+                axes[i, 1].set_title("Overlay", color=color, fontweight='bold', fontsize=10)
+                axes[i, 1].axis('off')
+
+                if geom_maps:
+                    axes[i, 2].imshow(geom_maps[i][0], cmap='viridis', vmin=0, vmax=1)
+                axes[i, 2].set_title("Prox A", color=color, fontweight='bold', fontsize=10)
+                axes[i, 2].axis('off')
+
+                if geom_maps:
+                    axes[i, 3].imshow(geom_maps[i][1], cmap='viridis', vmin=0, vmax=1)
+                axes[i, 3].set_title("Prox B", color=color, fontweight='bold', fontsize=10)
+                axes[i, 3].axis('off')
+
+                if geom_maps:
+                    axes[i, 4].imshow(geom_maps[i][2], cmap='hot', vmin=0, vmax=1)
+                axes[i, 4].set_title("Contact", color=color, fontweight='bold', fontsize=10)
+                axes[i, 4].axis('off')
+
+                for col in range(ncols):
+                    for spine in axes[i, col].spines.values():
+                        spine.set_color(color)
+                        spine.set_linewidth(lw)
 
         plt.tight_layout()
         plt.savefig(save_dir / f"group_{vis_count:04d}_{pair_key.replace('|', '_')}.png",
@@ -147,7 +217,8 @@ def visualize_predictions(groups, save_dir, max_groups=20, threshold=0.5,
 
 
 def analyze_failures(groups, save_dir, max_failures=20, threshold=0.5,
-                     attn_maps_dict=None, geom_maps_dict=None):
+                     attn_maps_dict=None, geom_maps_dict=None,
+                     gradcam_maps_dict=None, gate_maps_dict=None):
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
 
@@ -172,6 +243,8 @@ def analyze_failures(groups, save_dir, max_failures=20, threshold=0.5,
 
     print(f"Found {len(failures)} groups with errors (showing up to {max_failures})")
 
+    cnn_mode = gate_maps_dict is not None
+
     vis_count = 0
     for pair_key, samples, ranking_fail, fp_count in failures[:max_failures]:
         scores_arr = np.array([s['score'] for s in samples])
@@ -180,17 +253,32 @@ def analyze_failures(groups, save_dir, max_failures=20, threshold=0.5,
 
         attn_maps = attn_maps_dict.get(pair_key) if attn_maps_dict else None
         geom_maps = geom_maps_dict.get(pair_key) if geom_maps_dict else None
+        gradcam_maps = gradcam_maps_dict.get(pair_key) if gradcam_maps_dict else None
+        gate_maps = gate_maps_dict.get(pair_key) if gate_maps_dict else None
 
-        ncols = 5
-        fig, axes = plt.subplots(n, ncols, figsize=(ncols * 4, n * 4.5))
-        if n == 1:
-            axes = axes[np.newaxis, :]
+        if cnn_mode:
+            nrows = n * 2
+            ncols = 3
+            fig, axes = plt.subplots(nrows, ncols, figsize=(12, n * 8))
+            if nrows == 1:
+                axes = axes[np.newaxis, :]
+        else:
+            ncols = 5
+            fig, axes = plt.subplots(n, ncols, figsize=(ncols * 4, n * 4.5))
+            if n == 1:
+                axes = axes[np.newaxis, :]
+
         fig.suptitle(
             f"[{'RANK FAIL' if ranking_fail else 'FP ONLY'}] {pair_key}  "
             f"|  FP={fp_count}/{n}",
             fontsize=13, fontweight='bold', color='red' if ranking_fail else 'orange',
             y=1.02,
         )
+
+        import matplotlib.cm as cm
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize
+        from skimage.transform import resize as sk_resize
 
         for i in range(n):
             correct = (scores_arr[i] > threshold) == (labels_arr[i] == 1.0)
@@ -199,43 +287,92 @@ def analyze_failures(groups, save_dir, max_failures=20, threshold=0.5,
 
             img = denormalize_image(samples[i]['rgb'])
             title_rgb = _sample_title(labels_arr[i], scores_arr[i], threshold)
+            H, W = img.shape[:2]
 
-            axes[i, 0].imshow(img)
-            axes[i, 0].set_title(title_rgb, color=color, fontweight='bold', fontsize=10)
-            axes[i, 0].axis('off')
+            if cnn_mode:
+                axes[i*2, 0].imshow(img)
+                axes[i*2, 0].set_title(title_rgb, color=color, fontweight='bold', fontsize=10)
+                axes[i*2, 0].axis('off')
 
-            img_attn = img.copy()
-            if attn_maps is not None:
-                from skimage.transform import resize as sk_resize
-                import matplotlib.cm as cm
-                H, W = img.shape[:2]
-                attn_resized = sk_resize(attn_maps[i], (H, W), order=3, preserve_range=True)
-                attn_norm = (attn_resized - attn_resized.min()) / (attn_resized.max() - attn_resized.min() + 1e-8)
-                heatmap = cm.jet(attn_norm)[:, :, :3]
-                img_attn = np.clip(0.6 * heatmap + 0.4 * img, 0, 1)
-            axes[i, 1].imshow(img_attn)
-            axes[i, 1].set_title("Overlay", color=color, fontweight='bold', fontsize=10)
-            axes[i, 1].axis('off')
+                img_gc = img.copy()
+                if gradcam_maps is not None:
+                    gc_resized = sk_resize(gradcam_maps[i], (H, W), order=3, preserve_range=True)
+                    gc_norm = (gc_resized - gc_resized.min()) / (gc_resized.max() - gc_resized.min() + 1e-8)
+                    heatmap_gc = cm.jet(gc_norm)[:, :, :3]
+                    img_gc = np.clip(0.6 * heatmap_gc + 0.4 * img, 0, 1)
+                axes[i*2, 1].imshow(img_gc)
+                axes[i*2, 1].set_title("Grad-CAM", color=color, fontweight='bold', fontsize=10)
+                axes[i*2, 1].axis('off')
+                sm_gc = ScalarMappable(cmap='jet', norm=Normalize(0, 1))
+                sm_gc.set_array([])
+                fig.colorbar(sm_gc, ax=axes[i*2, 1], fraction=0.046, pad=0.04, shrink=0.8)
 
-            if geom_maps:
-                axes[i, 2].imshow(geom_maps[i][0], cmap='viridis', vmin=0, vmax=1)
-            axes[i, 2].set_title("Prox A", color=color, fontweight='bold', fontsize=10)
-            axes[i, 2].axis('off')
+                img_gt = img.copy()
+                if gate_maps is not None:
+                    gt_resized = sk_resize(gate_maps[i], (H, W), order=3, preserve_range=True)
+                    heatmap_gt = cm.jet(gt_resized)[:, :, :3]
+                    img_gt = np.clip(0.6 * heatmap_gt + 0.4 * img, 0, 1)
+                axes[i*2, 2].imshow(img_gt)
+                axes[i*2, 2].set_title("Gate Map", color=color, fontweight='bold', fontsize=10)
+                axes[i*2, 2].axis('off')
+                sm_gt = ScalarMappable(cmap='jet', norm=Normalize(0, 1))
+                sm_gt.set_array([])
+                fig.colorbar(sm_gt, ax=axes[i*2, 2], fraction=0.046, pad=0.04, shrink=0.8)
 
-            if geom_maps:
-                axes[i, 3].imshow(geom_maps[i][1], cmap='viridis', vmin=0, vmax=1)
-            axes[i, 3].set_title("Prox B", color=color, fontweight='bold', fontsize=10)
-            axes[i, 3].axis('off')
+                if geom_maps:
+                    axes[i*2+1, 0].imshow(geom_maps[i][0], cmap='viridis', vmin=0, vmax=1)
+                axes[i*2+1, 0].set_title("Prox A", color=color, fontweight='bold', fontsize=10)
+                axes[i*2+1, 0].axis('off')
 
-            if geom_maps:
-                axes[i, 4].imshow(geom_maps[i][2], cmap='hot', vmin=0, vmax=1)
-            axes[i, 4].set_title("Contact", color=color, fontweight='bold', fontsize=10)
-            axes[i, 4].axis('off')
+                if geom_maps:
+                    axes[i*2+1, 1].imshow(geom_maps[i][1], cmap='viridis', vmin=0, vmax=1)
+                axes[i*2+1, 1].set_title("Prox B", color=color, fontweight='bold', fontsize=10)
+                axes[i*2+1, 1].axis('off')
 
-            for col in range(ncols):
-                for spine in axes[i, col].spines.values():
-                    spine.set_color(color)
-                    spine.set_linewidth(lw)
+                if geom_maps:
+                    axes[i*2+1, 2].imshow(geom_maps[i][2], cmap='hot', vmin=0, vmax=1)
+                axes[i*2+1, 2].set_title("Contact", color=color, fontweight='bold', fontsize=10)
+                axes[i*2+1, 2].axis('off')
+
+                for row_off in range(2):
+                    for col_off in range(3):
+                        for spine in axes[i*2 + row_off, col_off].spines.values():
+                            spine.set_color(color)
+                            spine.set_linewidth(lw)
+            else:
+                axes[i, 0].imshow(img)
+                axes[i, 0].set_title(title_rgb, color=color, fontweight='bold', fontsize=10)
+                axes[i, 0].axis('off')
+
+                img_attn = img.copy()
+                if attn_maps is not None:
+                    attn_resized = sk_resize(attn_maps[i], (H, W), order=3, preserve_range=True)
+                    attn_norm = (attn_resized - attn_resized.min()) / (attn_resized.max() - attn_resized.min() + 1e-8)
+                    heatmap = cm.jet(attn_norm)[:, :, :3]
+                    img_attn = np.clip(0.6 * heatmap + 0.4 * img, 0, 1)
+                axes[i, 1].imshow(img_attn)
+                axes[i, 1].set_title("Overlay", color=color, fontweight='bold', fontsize=10)
+                axes[i, 1].axis('off')
+
+                if geom_maps:
+                    axes[i, 2].imshow(geom_maps[i][0], cmap='viridis', vmin=0, vmax=1)
+                axes[i, 2].set_title("Prox A", color=color, fontweight='bold', fontsize=10)
+                axes[i, 2].axis('off')
+
+                if geom_maps:
+                    axes[i, 3].imshow(geom_maps[i][1], cmap='viridis', vmin=0, vmax=1)
+                axes[i, 3].set_title("Prox B", color=color, fontweight='bold', fontsize=10)
+                axes[i, 3].axis('off')
+
+                if geom_maps:
+                    axes[i, 4].imshow(geom_maps[i][2], cmap='hot', vmin=0, vmax=1)
+                axes[i, 4].set_title("Contact", color=color, fontweight='bold', fontsize=10)
+                axes[i, 4].axis('off')
+
+                for col in range(ncols):
+                    for spine in axes[i, col].spines.values():
+                        spine.set_color(color)
+                        spine.set_linewidth(lw)
 
         plt.tight_layout()
         plt.savefig(save_dir / f"failure_{vis_count:04d}_{pair_key.replace('|', '_')}.png",

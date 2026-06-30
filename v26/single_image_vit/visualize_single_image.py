@@ -196,6 +196,10 @@ def main():
     print(f"Model type: {model_type}")
 
     cfg = Config()
+    cache_dir = None
+    if cfg.data.CACHE_DIR:
+        cd = Path(cfg.data.CACHE_DIR)
+        cache_dir = cd if cd.is_absolute() else Path(cfg.data.DATA_ROOT) / cd
     val_dataset = SingleImageDataset(
         data_root=cfg.data.DATA_ROOT,
         use_geometric=True,
@@ -203,6 +207,7 @@ def main():
         threshold=cfg.data.THRESHOLD,
         debug=args.debug,
         limit=args.limit if not args.debug else 0,
+        cache_dir=cache_dir,
     )
 
     val_dataset.augment = False

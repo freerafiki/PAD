@@ -18,6 +18,7 @@ import numpy as np
 from collections import defaultdict
 from torch.utils.data import DataLoader
 
+import torch.nn.functional as F
 from single_image_utils.dataset_single import SingleImageDataset
 from single_image_utils.vis_utils import (
     visualize_predictions,
@@ -25,18 +26,23 @@ from single_image_utils.vis_utils import (
     analyze_failures,
     inspect_batch_channels,
 )
-from single_image_cnn.cnn_models import PuzzleScorer
+from single_image_cnn.resnet_models import PairwiseCompatibilityModel, PairwiseCompatibilityDualModel
 from single_image_cnn.config_cnn import Config
 
 
-def load_model(checkpoint_path, device="cuda", use_geom=False):
+def load_model(checkpoint_path, device="cuda"):
     checkpoint_path = Path(checkpoint_path)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     state_dict = ckpt.get("model_state_dict", ckpt)
 
     cfg = Config()
-    model = PuzzleScorer(use_geom=use_geom, dropout=cfg.model.DROPOUT)
+    if cfg.model.TYPE == 'single':
+        model = PairwiseCompatibilityModel()
+    elif cfg.model.TYPE == 'dual':
+        raise NotImplementedError("Dual model visualization not implemented yet")
+    else:
+        raise ValueError(f"Unknown model type: {cfg.model.TYPE}")
 
     model.load_state_dict(state_dict)
     model = model.to(device)
@@ -51,7 +57,7 @@ def load_model(checkpoint_path, device="cuda", use_geom=False):
     return model, ckpt.get("history")
 
 
-def run_inference(model, dataloader, device, use_geom=False):
+def run_inference(model, dataloader, device):
     all_samples = []
 
     with torch.no_grad():
@@ -62,10 +68,8 @@ def run_inference(model, dataloader, device, use_geom=False):
             categories = batch["category"]
             pair_keys = batch["pair_key"]
 
-            if use_geom:
-                logits = model(rgb_geometric).squeeze()
-            else:
-                logits = model(rgb).squeeze()
+            guidance_map = rgb_geometric[:, 5:6]
+            logits = model(rgb, guidance_map).squeeze()
 
             scores = torch.sigmoid(logits).cpu().numpy()
             labels_np = labels.cpu().numpy()
@@ -85,6 +89,79 @@ def run_inference(model, dataloader, device, use_geom=False):
         groups[s['pair_key']].append(s)
 
     return all_samples, dict(groups)
+
+
+def extract_gradcam_maps(model, rgb, guidance_map):
+    model.eval()
+    target_layer = model.encoder.layer4[-1]
+
+    features = []
+    grads = []
+
+    def fwd_hook(m, i, o):
+        features.append(o)
+
+    def bwd_hook(m, gi, go):
+        grads.append(go[0])
+
+    fh = target_layer.register_forward_hook(fwd_hook)
+    bh = target_layer.register_full_backward_hook(bwd_hook)
+
+    rgb = rgb.clone().requires_grad_(True)
+    logits = model(rgb, guidance_map)
+
+    model.zero_grad()
+    logits.sum().backward()
+
+    fh.remove()
+    bh.remove()
+
+    feat = features[0]
+    grad = grads[0]
+
+    weights = grad.mean(dim=(2, 3), keepdim=True)
+    cam = (weights * feat).sum(dim=1)
+    cam = F.relu(cam)
+
+    cam_maps = cam.detach().cpu().numpy()
+    for i in range(cam_maps.shape[0]):
+        c = cam_maps[i]
+        c_min, c_max = c.min(), c.max()
+        if c_max > c_min:
+            cam_maps[i] = (c - c_min) / (c_max - c_min)
+        else:
+            cam_maps[i] = 0
+
+    return cam_maps
+
+
+def extract_gate_maps(model, rgb, guidance_map):
+    model.eval()
+
+    last_block = model.encoder.layer4[-1]
+    if hasattr(last_block, 'gconv2'):
+        target_conv = last_block.gconv2
+    else:
+        target_conv = last_block.conv2
+
+    gate_conv = target_conv.gate_conv
+    gate_outputs = []
+
+    def hook(m, i, o):
+        gate_outputs.append(o.detach())
+
+    handle = gate_conv.register_forward_hook(hook)
+
+    with torch.no_grad():
+        model(rgb, guidance_map)
+
+    handle.remove()
+
+    gate_raw = gate_outputs[0]
+    gate = torch.sigmoid(gate_raw)
+    gate_map = gate.mean(dim=1)
+
+    return gate_map.cpu().numpy()
 
 
 def main():
@@ -108,8 +185,6 @@ def main():
                         help="Limit total images (0 = all, default 600 for speed)")
     parser.add_argument("--debug", action="store_true",
                         help="Use debug mode (200 images per category)")
-    parser.add_argument("--use-geom", action="store_true",
-                        help="Model was trained with geometric features")
     args = parser.parse_args()
 
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -117,10 +192,13 @@ def main():
     output_dir.mkdir(exist_ok=True, parents=True)
     print(f"Output directory: {output_dir}")
 
-    model, history = load_model(args.model, device, use_geom=args.use_geom)
-    print(f"Using geometric: {args.use_geom}")
+    model, history = load_model(args.model, device)
 
     cfg = Config()
+    cache_dir = None
+    if cfg.data.CACHE_DIR:
+        cd = Path(cfg.data.CACHE_DIR)
+        cache_dir = cd if cd.is_absolute() else Path(cfg.data.DATA_ROOT) / cd
     val_dataset = SingleImageDataset(
         data_root=cfg.data.DATA_ROOT,
         use_geometric=True,
@@ -128,6 +206,7 @@ def main():
         threshold=cfg.data.THRESHOLD,
         debug=args.debug,
         limit=args.limit if not args.debug else 0,
+        cache_dir=cache_dir,
     )
 
     val_dataset.augment = False
@@ -148,16 +227,21 @@ def main():
             save_path = output_dir / "batch_inspection.png"
         inspect_batch_channels(
             first_batch, save_path=save_path, show=args.show_batch,
-            model=model, device=device, use_geom=args.use_geom,
+            model=model, device=device, use_geom=True,
         )
 
     print("\nRunning inference on validation set...")
-    all_samples, groups = run_inference(model, dataloader, device, args.use_geom)
+    all_samples, groups = run_inference(model, dataloader, device)
 
-    # Pre-compute geometric maps per group (no attention maps for CNN)
+    # Pre-compute geometric, Grad-CAM, and gate maps per group
     geom_maps_dict = {}
+    gradcam_maps_dict = {}
+    gate_maps_dict = {}
     for pair_key, samples in groups.items():
+        rgbs = torch.stack([s['rgb'] for s in samples]).to(device)
         rg_geom = torch.stack([s['rgb_geometric'] for s in samples]).to(device)
+        guidance_map = rg_geom[:, 5:6]
+
         geom = []
         for i in range(len(samples)):
             geom.append((
@@ -167,10 +251,14 @@ def main():
             ))
         geom_maps_dict[pair_key] = geom
 
+        gradcam_maps_dict[pair_key] = extract_gradcam_maps(model, rgbs, guidance_map)
+        gate_maps_dict[pair_key] = extract_gate_maps(model, rgbs, guidance_map)
+
     print(f"\nVisualizing group predictions ({args.max_groups} groups)...")
     visualize_predictions(groups, output_dir / "groups", max_groups=args.max_groups,
                           threshold=args.threshold,
-                          attn_maps_dict=None,
+                          gradcam_maps_dict=gradcam_maps_dict,
+                          gate_maps_dict=gate_maps_dict,
                           geom_maps_dict=geom_maps_dict)
 
     print("\nPlotting score distribution...")
@@ -180,7 +268,8 @@ def main():
         print("\nAnalyzing failures...")
         analyze_failures(groups, output_dir / "failures", max_failures=20,
                          threshold=args.threshold,
-                         attn_maps_dict=None,
+                         gradcam_maps_dict=gradcam_maps_dict,
+                         gate_maps_dict=gate_maps_dict,
                          geom_maps_dict=geom_maps_dict)
 
     pos_scores = [s['score'] for s in all_samples if s['label'] == 1.0]

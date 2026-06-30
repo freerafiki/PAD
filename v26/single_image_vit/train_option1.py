@@ -37,6 +37,10 @@ def main():
         console.print(f"Train: {num_images} images  Val: {num_images_val} images  "
                       f"({cfg.data.POSITIVE_RATIO:.0%} positive)")
 
+    cache_dir = None
+    if cfg.data.CACHE_DIR:
+        cd = Path(cfg.data.CACHE_DIR)
+        cache_dir = cd if cd.is_absolute() else Path(cfg.data.DATA_ROOT) / cd
     train_dataset, val_dataset = SingleImageDataset.create_puzzle_split(
         data_root=cfg.data.DATA_ROOT,
         train_ratio=cfg.data.TRAIN_RATIO,
@@ -50,6 +54,7 @@ def main():
         num_images=num_images,
         num_images_val=num_images_val,
         positive_ratio=cfg.data.POSITIVE_RATIO,
+        cache_dir=cache_dir,
     )
 
     if cfg.data.SAME_PAIR_BATCH:

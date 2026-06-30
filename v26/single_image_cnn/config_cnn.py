@@ -15,18 +15,20 @@ class DataConfig:
     SEED: int = 42
     DEBUG: bool = False
     USE_GEOMETRIC: bool = False
-    NUM_IMAGES: int = 200000
-    NUM_IMAGES_VAL: int = 20000
+    NUM_IMAGES: int = 300000
+    NUM_IMAGES_VAL: int = 50000
     POSITIVE_RATIO: float = 0.07
     SAME_PAIR_BATCH: bool = False
-    RADIUS: int = 25
-    THRESHOLD: int = 25
+    RADIUS: int = 35
+    THRESHOLD: int = 35
+    CACHE_DIR: str = ".data_cache"
 
 
 @dataclass
 class ModelConfig:
     TYPE: str = 'single'  # 'single' (pieces in the same image) or 'dual' (each piece its own RGB image)
     DROPOUT: float = 0.5
+    BACKBONE: str = 'resnet'
 
 @dataclass
 class TrainingConfig:

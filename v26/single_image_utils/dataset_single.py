@@ -16,7 +16,13 @@ import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
 import re
 import random
+import hashlib
+import json
+import pickle
 
+
+def split_pieces(rgb, geom):
+    raise NotImplementedError("TODO")
 
 class SamePairBatchSampler(Sampler):
     """Yields one batch per pair_key. For small groups (< batch_size), cycles
@@ -212,7 +218,7 @@ class SingleImageDataset(Dataset):
     def __init__(self, data_root, use_geometric=False, radius=25, threshold=25,
                  transform=None, debug=False, limit=0, puzzle_ids=None,
                  augment=False, augment_cfg=None,
-                 num_images=0, positive_ratio=0.1):
+                 num_images=0, positive_ratio=0.1, cache_dir=None):
         self.data_root = Path(data_root)
         self.use_geometric = use_geometric
         self.radius = radius
@@ -224,6 +230,7 @@ class SingleImageDataset(Dataset):
         self.augment_cfg = augment_cfg
         self.num_images = num_images
         self.positive_ratio = positive_ratio
+        self.cache_dir = Path(cache_dir) if cache_dir else None
 
         self.transform = transform or transforms.Compose([
             transforms.Resize((224, 224)),
@@ -256,7 +263,33 @@ class SingleImageDataset(Dataset):
             aug_list.append(transforms.RandomGrayscale(p=cfg.RANDOM_GRAYSCALE_PROB))
         return transforms.Compose(aug_list) if aug_list else None
 
+    def _cache_params(self):
+        return {
+            'data_root': str(self.data_root),
+            'num_images': self.num_images,
+            'positive_ratio': self.positive_ratio,
+            'debug': self.debug,
+            'limit': self.limit,
+            'puzzle_ids': tuple(sorted(self.puzzle_ids)) if self.puzzle_ids else None,
+        }
+
     def _scan_files(self):
+        if self.cache_dir:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_params = self._cache_params()
+            cache_hash = hashlib.md5(json.dumps(cache_params, sort_keys=True).encode()).hexdigest()
+            cache_file = self.cache_dir / f"samples_{cache_hash}.pkl"
+            if cache_file.exists():
+                try:
+                    with open(cache_file, 'rb') as f:
+                        cached = pickle.load(f)
+                    if cached.get('hash') == cache_hash:
+                        print(f"  Loaded {len(cached['samples'])} samples from cache {cache_file}")
+                        return cached['samples']
+                    print(f"  Cache hash mismatch, re-scanning...")
+                except Exception as e:
+                    print(f"  Cache read failed ({e}), re-scanning...")
+
         samples = []
         for category in ['positive', 'negative', 'hard_negative']:
             images_dir = self.data_root / category / 'images'
@@ -314,6 +347,14 @@ class SingleImageDataset(Dataset):
             random.Random(42).shuffle(samples)
             samples = samples[:self.limit]
 
+        if self.cache_dir:
+            try:
+                with open(cache_file, 'wb') as f:
+                    pickle.dump({'hash': cache_hash, 'samples': samples}, f)
+                print(f"  Saved {len(samples)} samples to cache {cache_file}")
+            except Exception as e:
+                print(f"  Cache write failed ({e})")
+
         return samples
 
     def _print_statistics(self):
@@ -342,7 +383,19 @@ class SingleImageDataset(Dataset):
             mask_array = np.array(mask_resized)
             scaled_radius = max(1, int(round(self.radius * scale)))
             scaled_threshold = max(1, int(round(self.threshold * scale)))
-            geometric = create_geometric_features(mask_array, scaled_radius, scaled_threshold)
+
+            if self.cache_dir:
+                geom_cache_dir = self.cache_dir / 'geom'
+                geom_cache_dir.mkdir(parents=True, exist_ok=True)
+                mask_key = hashlib.md5(sample['mask_path'].encode()).hexdigest()
+                geom_file = geom_cache_dir / f"{mask_key}_r{self.radius}_t{self.threshold}.npy"
+                if geom_file.exists():
+                    geometric = np.load(geom_file)
+                else:
+                    geometric = create_geometric_features(mask_array, scaled_radius, scaled_threshold)
+                    np.save(geom_file, geometric)
+            else:
+                geometric = create_geometric_features(mask_array, scaled_radius, scaled_threshold)
         else:
             geometric = np.zeros((3, 224, 224), dtype=np.float32)
 

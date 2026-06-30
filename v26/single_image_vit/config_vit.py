@@ -21,6 +21,7 @@ class DataConfig:
     SAME_PAIR_BATCH: bool = False
     RADIUS: int = 25
     THRESHOLD: int = 25
+    CACHE_DIR: str = ""
 
 
 @dataclass
