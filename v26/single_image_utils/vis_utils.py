@@ -1,3 +1,4 @@
+import random
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -14,10 +15,10 @@ def denormalize_image(tensor):
 
 
 def _sample_title(label, score, threshold=0.5):
-    gt_text = "correct" if label == 1.0 else "wrong"
+    gt_label = "pos" if label == 1.0 else "neg"
     correct = (score > threshold) == (label == 1.0)
     pred_text = "correct" if correct else "wrong"
-    return f"gt={gt_text}\npred={pred_text}\nscore={score:.3f}"
+    return f"gt={gt_label}\npred={pred_text}\nscore={score:.3f}"
 
 
 def visualize_score_distribution(all_samples, save_path):
@@ -57,21 +58,13 @@ def visualize_predictions(groups, save_dir, max_groups=20, threshold=0.5,
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
 
-    def group_rank_key(item):
-        pair_key, samples = item
-        s_arr = np.array([s['score'] for s in samples])
-        l_arr = np.array([s['label'] for s in samples])
-        pm = l_arr == 1.0
-        if pm.sum() >= 1:
-            return 0 if l_arr[np.argmax(s_arr)] == 1.0 else 1
-        return 2
-
-    sorted_groups = sorted(groups.items(), key=group_rank_key)
+    items = list(groups.items())
+    random.shuffle(items)
 
     cnn_mode = gate_maps_dict is not None
 
     vis_count = 0
-    for pair_key, samples in sorted_groups:
+    for pair_key, samples in items:
         if vis_count >= max_groups:
             break
 
@@ -453,3 +446,27 @@ def inspect_batch_channels(batch, save_path=None, show=False, model=None,
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Saved batch inspection to {save_path}")
     plt.close()
+
+
+def plot_gate_maps_multiscale(gate_maps, save_path, max_samples=4):
+    stage_order = ["stem", "layer1", "layer2", "layer3", "layer4"]
+    n_samples = min(max_samples, next(iter(gate_maps.values())).shape[0])
+    n_stages = len(stage_order)
+
+    fig, axes = plt.subplots(n_samples, n_stages,
+                              figsize=(2.5 * n_stages, 2.5 * n_samples))
+    if n_samples == 1:
+        axes = axes[None, :]
+
+    for row in range(n_samples):
+        for col, stage in enumerate(stage_order):
+            gmap = gate_maps[stage][row]
+            ax = axes[row, col]
+            im = ax.imshow(gmap, cmap="viridis", vmin=0, vmax=1)
+            if row == 0:
+                ax.set_title(f"{stage}\n{gmap.shape[0]}x{gmap.shape[1]}", fontsize=9)
+            ax.axis("off")
+
+    fig.colorbar(im, ax=axes, shrink=0.6, label="gate value")
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)

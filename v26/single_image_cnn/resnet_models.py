@@ -435,12 +435,9 @@ class GuidedResNet(nn.Module):
         block_cls, stages = self.CONFIGS[variant]
         base = 64   # channels after stem — fixed across all variants
 
-        self.stem = nn.Sequential(
-            nn.Conv2d(in_nc, base, 7, stride=2, padding=3, bias=False),
-            nn.BatchNorm2d(base),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(3, stride=2, padding=1),
-        )
+        self.stem_gconv = GuidanceGatedConv2d(in_nc, base, guidance_nc, kernel_size=7, stride=2, padding=3)
+        self.stem_bn    = nn.BatchNorm2d(base)
+        self.stem_pool  = nn.MaxPool2d(3, stride=2, padding=1)
 
         exp = block_cls.expansion   # 1 for BasicBlock, 4 for Bottleneck
         self.layer1 = self._make_stage(block_cls, base,       base,     stages[0], 1, guidance_nc)
@@ -470,7 +467,9 @@ class GuidedResNet(nn.Module):
 
     def forward(self, x, guidance):
         self._guidance = guidance
-        f = self.stem(x)
+        f = self.stem_gconv(x, guidance)          # gated conv, sees full guidance detail
+        f = F.relu(self.stem_bn(f), inplace=True)
+        f = self.stem_pool(f)
         f = self.layer1(f)
         f = self.layer2(f)
         f = self.layer3(f)

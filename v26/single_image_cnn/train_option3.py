@@ -4,6 +4,8 @@ _proj_root = str(Path(__file__).resolve().parent.parent)
 if _proj_root not in sys.path:
     sys.path.insert(0, _proj_root)
 
+import dataclasses
+import json
 import argparse
 import torch
 import torch.optim as optim
@@ -13,7 +15,7 @@ from rich.console import Console
 
 from single_image_utils.dataset_single import SingleImageDataset, SamePairBatchSampler
 from single_image_utils.train_utils import train_model
-from single_image_cnn.resnet_models import PairwiseCompatibilityDualModel, PairwiseCompatibilityModel
+from single_image_cnn.resnet_models import PairwiseCompatibilityDualModel, PairwiseCompatibilityModel, GuidedResNet
 from single_image_cnn.config_cnn import Config
 
 
@@ -105,10 +107,12 @@ def main():
     console.print(f"TRAINING: {'RGB+Geometric' if use_geom else 'RGB only'} + BCE")
     console.print(f"{'=' * 60}")
 
+    # if cfg.model.BACKBONE == 'CNN' or 'RESNET'
+    encoder = GuidedResNet(variant=cfg.model.RESNET, in_nc=3, guidance_nc=1)
     if cfg.model.TYPE == 'single':
-        model = PairwiseCompatibilityModel()
+        model = PairwiseCompatibilityModel(encoder=encoder)
     elif cfg.model.TYPE == 'dual':
-        model = PairwiseCompatibilityDualModel(dropout=cfg.model.DROPOUT)
+        model = PairwiseCompatibilityDualModel(encoder=encoder, dropout=cfg.model.DROPOUT)
     else:
         raise NotImplementedError(f"Problem with model type: {cfg.model.TYPE} - check in the `config.py` file.")
 
@@ -166,7 +170,14 @@ def main():
         initial_history=initial_history,
         initial_best_val_acc=initial_best_val_acc,
         initial_patience=initial_patience,
+        log_batch_every_n=cfg.training.LOG_BATCH_EVERY_N,
     )
+
+    log_dir = Path("checkpoints") / cfg.name
+    params = {"config": dataclasses.asdict(cfg), "history": history}
+    with open(log_dir / "params.json", "w") as f:
+        json.dump(params, f, indent=2, default=str)
+    console.print(f"Saved params.json to {log_dir / 'params.json'}")
 
 
 if __name__ == "__main__":

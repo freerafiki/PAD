@@ -5,6 +5,7 @@ import numpy as np
 from collections import defaultdict
 import matplotlib.pyplot as plt
 from pathlib import Path
+import json
 from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
@@ -191,6 +192,53 @@ def plot_single_image_history(history, save_path):
     print(f"Saved training history plot to {save_path}")
 
 
+def save_batch_samples_figure(batch_data, save_path, max_samples=32):
+    rgb = batch_data['rgb']
+    labels = batch_data['labels']
+    logits = batch_data['logits']
+    scores = torch.sigmoid(logits).numpy()
+    n = len(scores)
+    n_show = min(n, max_samples)
+
+    best_waste = n_show
+    best_cols, best_rows = n_show, 1
+    for c in range(int(np.ceil(np.sqrt(n_show))), n_show + 1):
+        r = int(np.ceil(n_show / c))
+        waste = c * r - n_show
+        if waste < best_waste or (waste == best_waste and c > best_cols):
+            best_waste = waste
+            best_cols, best_rows = c, r
+
+    fig, axes = plt.subplots(best_rows, best_cols, figsize=(best_cols * 3.5, best_rows * 3.5))
+    axes_flat = axes.flatten() if best_rows > 1 or best_cols > 1 else [axes]
+
+    for i in range(best_rows * best_cols):
+        ax = axes_flat[i]
+        if i >= n_show:
+            ax.set_visible(False)
+            continue
+        img = rgb[i].cpu().numpy().transpose(1, 2, 0)
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        img = np.clip(img * std + mean, 0, 1)
+        label = labels[i].item()
+        score = float(scores[i])
+        correct = (score > 0.5) == (label == 1.0)
+        color = 'green' if correct else 'red'
+
+        ax.imshow(img)
+        gt = "pos" if label == 1.0 else "neg"
+        ax.set_title(f"label={gt}\nscore={score:.3f}", fontsize=8, color=color, fontweight='bold')
+        for spine in ax.spines.values():
+            spine.set_color(color)
+            spine.set_linewidth(2)
+        ax.set_xticks([]); ax.set_yticks([])
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+
 def train_model(
     model,
     train_loader,
@@ -212,10 +260,13 @@ def train_model(
     initial_history=None,
     initial_best_val_acc=0.0,
     initial_patience=0,
+    log_batch_every_n=0,
 ):
     console = Console()
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
+    log_dir = save_dir / model_name
+    log_dir.mkdir(exist_ok=True, parents=True)
 
     bce_criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight_val_BCE]).to(device))
 
@@ -298,6 +349,9 @@ def train_model(
                 lr=0.0,
             )
 
+            should_log = (epoch == 1) or (log_batch_every_n > 0 and (epoch - 1) % log_batch_every_n == 0)
+            sample_batch = None
+
             for batch in train_loader:
                 rgb = batch["rgb"].to(device)
                 rgb_geometric = batch["rgb_geometric"].to(device)
@@ -317,6 +371,13 @@ def train_model(
                     else:
                         logits = model(rgb, guidance_map).squeeze()
 
+                if should_log and sample_batch is None:
+                    sample_batch = {
+                        'rgb': rgb.detach().cpu(),
+                        'labels': labels.detach().cpu(),
+                        'logits': logits.detach().cpu(),
+                    }
+
                 loss = bce_criterion(logits, labels.squeeze())
 
                 loss.backward()
@@ -331,6 +392,11 @@ def train_model(
 
             progress.remove_task(task)
             avg_train_loss = train_loss / num_batches
+
+            if sample_batch is not None:
+                batch_dir = log_dir / 'batch_samples'
+                batch_dir.mkdir(exist_ok=True)
+                save_batch_samples_figure(sample_batch, batch_dir / f'epoch_{epoch:03d}.png')
 
             eval_metrics = evaluate_single_image(
                 model, val_loader, bce_criterion, device, use_geom=use_geom,
@@ -371,8 +437,8 @@ def train_model(
                     "val_accuracy": val_acc,
                     "history": history,
                 }
-                torch.save(checkpoint, save_dir / f"{model_name}_best.pth")
-                torch.save(checkpoint, save_dir / f"{model_name}_best_at_epoch_{epoch}.pth")
+                torch.save(checkpoint, log_dir / f"{model_name}_best.pth")
+                torch.save(checkpoint, log_dir / f"{model_name}_best_at_epoch_{epoch}.pth")
                 console.print(f"  [green]>> Saved best model (acc: {val_acc:.3f})[/]")
             else:
                 patience_counter += 1
@@ -385,6 +451,9 @@ def train_model(
 
     console.print(f"\n[bold]Training complete![/] Best val accuracy: {best_val_acc:.3f}")
 
-    plot_single_image_history(history, save_dir / f"{model_name}_history.png")
+    plot_single_image_history(history, log_dir / "history.png")
+
+    with open(log_dir / "history.json", "w") as f:
+        json.dump(history, f, indent=2)
 
     return model, history

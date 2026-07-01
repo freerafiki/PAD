@@ -14,13 +14,13 @@ class DataConfig:
     TRAIN_RATIO: float = 0.8
     SEED: int = 42
     DEBUG: bool = False
-    USE_GEOMETRIC: bool = False
-    NUM_IMAGES: int = 300000
+    USE_GEOMETRIC: bool = True
+    NUM_IMAGES: int = 500000
     NUM_IMAGES_VAL: int = 50000
     POSITIVE_RATIO: float = 0.07
     SAME_PAIR_BATCH: bool = False
-    RADIUS: int = 35
-    THRESHOLD: int = 35
+    RADIUS: int = 45
+    THRESHOLD: int = 45
     CACHE_DIR: str = ".data_cache"
 
 
@@ -29,6 +29,7 @@ class ModelConfig:
     TYPE: str = 'single'  # 'single' (pieces in the same image) or 'dual' (each piece its own RGB image)
     DROPOUT: float = 0.5
     BACKBONE: str = 'resnet'
+    RESNET: str = 'r50'
 
 @dataclass
 class TrainingConfig:
@@ -40,6 +41,7 @@ class TrainingConfig:
     GRAD_CLIP_MAX_NORM: float = 1.0
     BCE_POS_WEIGHT: float = 5.0
     DEVICE: str = field(default_factory=lambda: "cuda" if __import__("torch").cuda.is_available() else "cpu")
+    LOG_BATCH_EVERY_N: int = 5
 
 
 @dataclass
@@ -55,7 +57,7 @@ class LossConfig:
 
 @dataclass
 class AugmentationConfig:
-    ENABLED: bool = False
+    ENABLED: bool = True
     COLOR_JITTER: bool = True
     COLOR_JITTER_BRIGHTNESS: float = 0.2
     COLOR_JITTER_CONTRAST: float = 0.2
@@ -67,11 +69,11 @@ class AugmentationConfig:
     RANDOM_GRAYSCALE: bool = True
     RANDOM_GRAYSCALE_PROB: float = 0.05
     HORIZONTAL_FLIP: bool = True
-    HORIZONTAL_FLIP_PROB: float = 0.5
-    VERTICAL_FLIP: bool = False
-    VERTICAL_FLIP_PROB: float = 0.5
+    HORIZONTAL_FLIP_PROB: float = 0.4
+    VERTICAL_FLIP: bool = True
+    VERTICAL_FLIP_PROB: float = 0.4
     ROTATION_90: bool = True
-    ROTATION_90_PROB: float = 0.3
+    ROTATION_90_PROB: float = 0.6
 
 
 @dataclass
@@ -81,4 +83,4 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
-    name: str = "Option3_CNN_RGB_single"
+    name: str = "Option3_CNN_RGB_single_v3"

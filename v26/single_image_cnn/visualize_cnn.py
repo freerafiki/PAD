@@ -25,8 +25,9 @@ from single_image_utils.vis_utils import (
     visualize_score_distribution,
     analyze_failures,
     inspect_batch_channels,
+    plot_gate_maps_multiscale,
 )
-from single_image_cnn.resnet_models import PairwiseCompatibilityModel, PairwiseCompatibilityDualModel
+from single_image_cnn.resnet_models import PairwiseCompatibilityModel, PairwiseCompatibilityDualModel, GuidedResNet
 from single_image_cnn.config_cnn import Config
 
 
@@ -37,8 +38,10 @@ def load_model(checkpoint_path, device="cuda"):
     state_dict = ckpt.get("model_state_dict", ckpt)
 
     cfg = Config()
+    # if cfg.model.BACKBONE == 'CNN' or 'RESNET'
+    encoder = GuidedResNet(variant=cfg.model.RESNET, in_nc=3, guidance_nc=1)
     if cfg.model.TYPE == 'single':
-        model = PairwiseCompatibilityModel()
+        model = PairwiseCompatibilityModel(encoder=encoder)
     elif cfg.model.TYPE == 'dual':
         raise NotImplementedError("Dual model visualization not implemented yet")
     else:
@@ -164,6 +167,40 @@ def extract_gate_maps(model, rgb, guidance_map):
     return gate_map.cpu().numpy()
 
 
+def extract_gate_maps_multiscale(model, rgb, guidance_map):
+    model.eval()
+    encoder = model.encoder
+
+    targets = {"stem": encoder.stem_gconv}
+    for stage_name in ["layer1", "layer2", "layer3", "layer4"]:
+        stage = getattr(encoder, stage_name)
+        last_block = stage[-1]
+        conv = getattr(last_block, "gconv2", None) or getattr(last_block, "conv2", None)
+        targets[stage_name] = conv
+
+    hooks, outputs = [], {}
+
+    def make_hook(name):
+        def hook(m, i, o):
+            outputs[name] = o.detach()
+        return hook
+
+    for name, module in targets.items():
+        h = module.gate_conv.register_forward_hook(make_hook(name))
+        hooks.append(h)
+
+    with torch.no_grad():
+        model(rgb, guidance_map)
+
+    for h in hooks:
+        h.remove()
+
+    return {
+        name: torch.sigmoid(out).mean(dim=1).cpu().numpy()
+        for name, out in outputs.items()
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Visualize CNN single-image model predictions")
     parser.add_argument("--model", type=str, required=True, help="Path to model checkpoint")
@@ -237,6 +274,7 @@ def main():
     geom_maps_dict = {}
     gradcam_maps_dict = {}
     gate_maps_dict = {}
+    gate_maps_multiscale_dict = {}
     for pair_key, samples in groups.items():
         rgbs = torch.stack([s['rgb'] for s in samples]).to(device)
         rg_geom = torch.stack([s['rgb_geometric'] for s in samples]).to(device)
@@ -252,7 +290,8 @@ def main():
         geom_maps_dict[pair_key] = geom
 
         gradcam_maps_dict[pair_key] = extract_gradcam_maps(model, rgbs, guidance_map)
-        gate_maps_dict[pair_key] = extract_gate_maps(model, rgbs, guidance_map)
+        gate_maps_multiscale_dict[pair_key] = extract_gate_maps_multiscale(model, rgbs, guidance_map)
+        gate_maps_dict[pair_key] = gate_maps_multiscale_dict[pair_key]['layer4']
 
     print(f"\nVisualizing group predictions ({args.max_groups} groups)...")
     visualize_predictions(groups, output_dir / "groups", max_groups=args.max_groups,
@@ -260,6 +299,15 @@ def main():
                           gradcam_maps_dict=gradcam_maps_dict,
                           gate_maps_dict=gate_maps_dict,
                           geom_maps_dict=geom_maps_dict)
+
+    print("\nSaving multiscale gate maps per group...")
+    multi_dir = output_dir / "gate_multiscale"
+    multi_dir.mkdir(exist_ok=True)
+    for pair_key in list(groups.keys())[:args.max_groups]:
+        plot_gate_maps_multiscale(
+            gate_maps_multiscale_dict[pair_key],
+            save_path=multi_dir / f"gate_multiscale_{pair_key}.png",
+        )
 
     print("\nPlotting score distribution...")
     visualize_score_distribution(all_samples, output_dir / "score_distribution.png")

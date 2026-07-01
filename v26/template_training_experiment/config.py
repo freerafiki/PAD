@@ -1,52 +1,52 @@
 """
-Training configuration for the ViT ranking model.
+Training configuration for the CNN ranking model.
 
 Centralizes all hyperparameters in one place for easy experimentation.
 """
+
 from dataclasses import dataclass, field
 
 
 @dataclass
 class DataConfig:
-    DATA_ROOT: str = "/media/lucap/big_data/datasets/wikiart_PAD/PAD_dataset__Wikiart"
+    DATA_ROOT: str = "root_to_the_dataset"
     MIN_NEGATIVES_PER_POSITIVE: int = 4
     MAX_NEGATIVES_PER_POSITIVE: int = 16
     TRAIN_RATIO: float = 0.8
     SEED: int = 42
     DEBUG: bool = False
-    USE_GEOMETRIC: bool = False
-    NUM_IMAGES: int = 200000
-    NUM_IMAGES_VAL: int = 20000
+    USE_GEOMETRIC: bool = True
+    NUM_IMAGES: int = 3000
+    NUM_IMAGES_VAL: int = 500
     POSITIVE_RATIO: float = 0.07
     SAME_PAIR_BATCH: bool = False
-    RADIUS: int = 25
-    THRESHOLD: int = 25
-    CACHE_DIR: str = ""
+    RADIUS: int = 45
+    THRESHOLD: int = 45
+    CACHE_DIR: str = ".data_cache"  # set to "" to avoid saving
 
 
 @dataclass
 class ModelConfig:
-    TYPE: str = 'RGB'
-    DINO_MODEL: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
-    VIT_MODEL: str = "google/vit-base-patch16-224"
-    FROZEN_LAYERS: int = 8
+    # This is probably dependent on the model you choose!
+    TYPE: str = ""
     DROPOUT: float = 0.5
-    GEOMETRIC_CHANNEL_SCALE: float = 1.0
-    FILM_ENABLED: bool = False
-    FILM_T_DIM: int = 64
-    FILM_LAYERS: tuple = (8, 9, 10, 11)
+    BACKBONE: str = ""
 
 
 @dataclass
 class TrainingConfig:
     BATCH_SIZE: int = 128
-    NUM_EPOCHS: int = 20
-    LEARNING_RATE: float = 1e-4
+    NUM_EPOCHS: int = 10
+    LEARNING_RATE: float = 1e-3
     WEIGHT_DECAY: float = 1e-4
-    EARLY_STOPPING_PATIENCE: int = 5
+    EARLY_STOPPING_PATIENCE: int = 7
     GRAD_CLIP_MAX_NORM: float = 1.0
     BCE_POS_WEIGHT: float = 5.0
-    DEVICE: str = field(default_factory=lambda: "cuda" if __import__("torch").cuda.is_available() else "cpu")
+    DEVICE: str = field(
+        default_factory=lambda: "cuda"
+        if __import__("torch").cuda.is_available()
+        else "cpu"
+    )
     LOG_BATCH_EVERY_N: int = 0
 
 
@@ -63,7 +63,7 @@ class LossConfig:
 
 @dataclass
 class AugmentationConfig:
-    ENABLED: bool = False
+    ENABLED: bool = True
     COLOR_JITTER: bool = True
     COLOR_JITTER_BRIGHTNESS: float = 0.2
     COLOR_JITTER_CONTRAST: float = 0.2
@@ -75,11 +75,11 @@ class AugmentationConfig:
     RANDOM_GRAYSCALE: bool = True
     RANDOM_GRAYSCALE_PROB: float = 0.05
     HORIZONTAL_FLIP: bool = True
-    HORIZONTAL_FLIP_PROB: float = 0.5
-    VERTICAL_FLIP: bool = False
-    VERTICAL_FLIP_PROB: float = 0.5
+    HORIZONTAL_FLIP_PROB: float = 0.4
+    VERTICAL_FLIP: bool = True
+    VERTICAL_FLIP_PROB: float = 0.4
     ROTATION_90: bool = True
-    ROTATION_90_PROB: float = 0.3
+    ROTATION_90_PROB: float = 0.6
 
 
 @dataclass
@@ -89,4 +89,4 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
-    name: str = "Option1_RGB_single_img_b128"
+    name: str = "experiment"

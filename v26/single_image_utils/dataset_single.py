@@ -18,6 +18,7 @@ import re
 import random
 import hashlib
 import json
+import time
 import pickle
 
 
@@ -265,7 +266,6 @@ class SingleImageDataset(Dataset):
 
     def _cache_params(self):
         return {
-            'data_root': str(self.data_root),
             'num_images': self.num_images,
             'positive_ratio': self.positive_ratio,
             'debug': self.debug,
@@ -273,23 +273,46 @@ class SingleImageDataset(Dataset):
             'puzzle_ids': tuple(sorted(self.puzzle_ids)) if self.puzzle_ids else None,
         }
 
+    def _cache_tag(self):
+        n_str = f"n{self.num_images}" if self.num_images > 0 else "nAll"
+        r_str = f"r{int(self.positive_ratio * 100):03d}"
+        p_str = "full" if self.puzzle_ids is None else f"p{len(self.puzzle_ids)}"
+        return f"{n_str}_{r_str}_{p_str}"
+
+    def _reload_paths(self, sample_dict):
+        s = dict(sample_dict)
+        s['image_path'] = str(self.data_root / sample_dict['image_path'])
+        s['mask_path'] = str(self.data_root / sample_dict['mask_path'])
+        return s
+
     def _scan_files(self):
+        t0 = time.perf_counter()
+        cache_hit = False
+        cache_file = None
+
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             cache_params = self._cache_params()
             cache_hash = hashlib.md5(json.dumps(cache_params, sort_keys=True).encode()).hexdigest()
-            cache_file = self.cache_dir / f"samples_{cache_hash}.pkl"
+            cache_tag = self._cache_tag()
+            cache_file = self.cache_dir / f"samples_{cache_tag}_{cache_hash[:8]}.pkl"
             if cache_file.exists():
                 try:
+                    t_load = time.perf_counter()
                     with open(cache_file, 'rb') as f:
                         cached = pickle.load(f)
                     if cached.get('hash') == cache_hash:
-                        print(f"  Loaded {len(cached['samples'])} samples from cache {cache_file}")
-                        return cached['samples']
-                    print(f"  Cache hash mismatch, re-scanning...")
+                        reloaded = [self._reload_paths(s) for s in cached['samples']]
+                        elapsed = time.perf_counter() - t_load
+                        cache_hit = True
+                        print(f"  [CACHE HIT] Loaded {len(reloaded)} samples from {cache_file.name} "
+                              f"(pickle load: {elapsed:.2f}s)")
+                        return reloaded
+                    print(f"  [CACHE] Hash mismatch in {cache_file.name}, re-scanning...")
                 except Exception as e:
-                    print(f"  Cache read failed ({e}), re-scanning...")
+                    print(f"  [CACHE] Read failed ({e}), re-scanning...")
 
+        t_scan = time.perf_counter()
         samples = []
         for category in ['positive', 'negative', 'hard_negative']:
             images_dir = self.data_root / category / 'images'
@@ -328,9 +351,16 @@ class SingleImageDataset(Dataset):
                     'difficulty_score': get_difficulty_score(img_path.name),
                 })
 
-        if self.puzzle_ids is not None:
-            samples = [s for s in samples if s['puzzle_id'] in self.puzzle_ids]
+        t_filter = time.perf_counter()
+        t_scan_dur = t_filter - t_scan
+        print(f"  [SCAN] Directory walk + filename parsing: {len(samples)} files in {t_scan_dur:.2f}s")
 
+        if self.puzzle_ids is not None:
+            before = len(samples)
+            samples = [s for s in samples if s['puzzle_id'] in self.puzzle_ids]
+            print(f"  [SCAN] Puzzle filter: {before} -> {len(samples)} samples ({time.perf_counter() - t_filter:.2f}s)")
+
+        t_strat = time.perf_counter()
         if self.num_images > 0 and len(samples) > self.num_images:
             pos = [s for s in samples if s['label'] == 1.0]
             neg = [s for s in samples if s['label'] == 0.0]
@@ -346,15 +376,25 @@ class SingleImageDataset(Dataset):
         elif self.limit > 0 and len(samples) > self.limit:
             random.Random(42).shuffle(samples)
             samples = samples[:self.limit]
+        print(f"  [SCAN] Stratification ({len(samples)} final): {time.perf_counter() - t_strat:.2f}s")
 
-        if self.cache_dir:
+        if self.cache_dir and cache_file is not None:
+            t_save = time.perf_counter()
+            samples_cache = []
+            for s in samples:
+                sc = dict(s)
+                sc['image_path'] = str(Path(s['image_path']).relative_to(self.data_root))
+                sc['mask_path'] = str(Path(s['mask_path']).relative_to(self.data_root))
+                samples_cache.append(sc)
             try:
                 with open(cache_file, 'wb') as f:
-                    pickle.dump({'hash': cache_hash, 'samples': samples}, f)
-                print(f"  Saved {len(samples)} samples to cache {cache_file}")
+                    pickle.dump({'hash': cache_hash, 'samples': samples_cache}, f)
+                print(f"  [CACHE MISS] Saved {len(samples)} samples to {cache_file.name} "
+                      f"(pickle save: {time.perf_counter() - t_save:.2f}s)")
             except Exception as e:
-                print(f"  Cache write failed ({e})")
+                print(f"  [CACHE] Write failed ({e})")
 
+        print(f"  [SCAN] Total _scan_files: {time.perf_counter() - t0:.2f}s")
         return samples
 
     def _print_statistics(self):
@@ -438,8 +478,16 @@ class SingleImageDataset(Dataset):
     @classmethod
     def create_puzzle_split(cls, data_root, train_ratio=0.8, seed=42,
                             num_images_val=20000, **kwargs):
-        full = cls(data_root, **kwargs)
-        puzzles = sorted(set(s['puzzle_id'] for s in full.samples if s['puzzle_id']))
+        t0 = time.perf_counter()
+        puzzles = set()
+        for category in ['positive', 'negative', 'hard_negative']:
+            img_dir = Path(data_root) / category / 'images'
+            for fname in sorted(img_dir.glob('*.png')):
+                parsed = parse_filename(fname.name)
+                if parsed and parsed.get('puzzle_id'):
+                    puzzles.add(parsed['puzzle_id'])
+        puzzles = sorted(puzzles)
+        print(f"  [PUZZLE GLOB] Found {len(puzzles)} puzzles in {time.perf_counter() - t0:.2f}s")
         random.Random(seed).shuffle(puzzles)
         n_train = max(1, int(len(puzzles) * train_ratio))
         train_puzzles = set(puzzles[:n_train])
