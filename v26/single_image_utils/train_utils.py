@@ -6,6 +6,8 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 from pathlib import Path
 import json
+import contextlib
+from torch.profiler import profile, schedule, ProfilerActivity, tensorboard_trace_handler
 from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
@@ -261,6 +263,8 @@ def train_model(
     initial_best_val_acc=0.0,
     initial_patience=0,
     log_batch_every_n=0,
+    profile_steps=0,
+    profile_dir=None,
 ):
     console = Console()
     save_dir = Path(save_dir)
@@ -352,43 +356,78 @@ def train_model(
             should_log = (epoch == 1) or (log_batch_every_n > 0 and (epoch - 1) % log_batch_every_n == 0)
             sample_batch = None
 
-            for batch in train_loader:
-                rgb = batch["rgb"].to(device)
-                rgb_geometric = batch["rgb_geometric"].to(device)
-                labels = batch["labels"].to(device)
+            # Profile only the very first epoch we run in this call, and only if
+            # profile_steps > 0. Uses a wait/warmup/active schedule so the first
+            # (slow, cudnn-autotuning) iterations don't pollute the trace.
+            do_profile = profile_steps > 0 and epoch == start_epoch
+            if do_profile:
+                prof_dir = Path(profile_dir) if profile_dir else (log_dir / "profiler")
+                prof_dir.mkdir(exist_ok=True, parents=True)
+                prof_schedule = schedule(wait=1, warmup=1, active=profile_steps, repeat=1)
+                profiler_ctx = profile(
+                    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                    schedule=prof_schedule,
+                    on_trace_ready=tensorboard_trace_handler(str(prof_dir)),
+                    record_shapes=True,
+                    with_stack=False,
+                )
+                console.print(f"  [yellow]Profiling first {profile_steps} steps -> {prof_dir}[/]")
+            else:
+                profiler_ctx = contextlib.nullcontext()
 
-                optimizer.zero_grad()
+            with profiler_ctx as prof:
+                for batch in train_loader:
+                    rgb = batch["rgb"].to(device)
+                    rgb_geometric = batch["rgb_geometric"].to(device)
+                    labels = batch["labels"].to(device)
 
-                if backbone == 'vit':
-                    if use_geom:
-                        logits = model(rgb_geometric).squeeze()
-                    else:
-                        logits = model(rgb).squeeze()
-                elif backbone == 'resnet':
-                    guidance_map = rgb_geometric[:, 5:6]
-                    if split_pieces:
-                        raise NotImplementedError("split_pieces not implemented yet")
-                    else:
-                        logits = model(rgb, guidance_map).squeeze()
+                    optimizer.zero_grad()
 
-                if should_log and sample_batch is None:
-                    sample_batch = {
-                        'rgb': rgb.detach().cpu(),
-                        'labels': labels.detach().cpu(),
-                        'logits': logits.detach().cpu(),
-                    }
+                    if backbone == 'vit':
+                        if use_geom:
+                            logits = model(rgb_geometric).squeeze()
+                        else:
+                            logits = model(rgb).squeeze()
+                    elif backbone == 'resnet':
+                        guidance_map = rgb_geometric[:, 5:6]
+                        if split_pieces:
+                            raise NotImplementedError("split_pieces not implemented yet")
+                        else:
+                            logits = model(rgb, guidance_map).squeeze()
 
-                loss = bce_criterion(logits, labels.squeeze())
+                    if should_log and sample_batch is None:
+                        sample_batch = {
+                            'rgb': rgb.detach().cpu(),
+                            'labels': labels.detach().cpu(),
+                            'logits': logits.detach().cpu(),
+                        }
 
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
-                optimizer.step()
-                scheduler.step()
+                    loss = bce_criterion(logits, labels.squeeze())
 
-                train_loss += loss.item()
-                num_batches += 1
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+                    optimizer.step()
+                    scheduler.step()
 
-                progress.update(task, advance=1, loss=loss.item(), lr=scheduler.get_last_lr()[0])
+                    loss_val = loss.item()  # single sync point, reused below (was called twice before)
+                    train_loss += loss_val
+                    num_batches += 1
+
+                    progress.update(task, advance=1, loss=loss_val, lr=scheduler.get_last_lr()[0])
+
+                    if do_profile:
+                        prof.step()
+                        # wait(1) + warmup(1) + active(profile_steps) -> stop early once done
+                        if num_batches >= 2 + profile_steps:
+                            break
+
+            if do_profile:
+                console.print(f"  [yellow]Profiler trace written to {prof_dir} "
+                               f"(open with: tensorboard --logdir {prof_dir})[/]")
+                console.print(prof.key_averages().table(
+                    sort_by="cuda_time_total" if device == "cuda" else "cpu_time_total",
+                    row_limit=15,
+                ))
 
             progress.remove_task(task)
             avg_train_loss = train_loss / num_batches

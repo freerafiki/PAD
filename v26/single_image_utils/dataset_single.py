@@ -219,7 +219,8 @@ class SingleImageDataset(Dataset):
     def __init__(self, data_root, use_geometric=False, radius=25, threshold=25,
                  transform=None, debug=False, limit=0, puzzle_ids=None,
                  augment=False, augment_cfg=None,
-                 num_images=0, positive_ratio=0.1, cache_dir=None):
+                 num_images=0, positive_ratio=0.1, cache_dir=None,
+                 ssd_cache_dir=None):
         self.data_root = Path(data_root)
         self.use_geometric = use_geometric
         self.radius = radius
@@ -232,6 +233,13 @@ class SingleImageDataset(Dataset):
         self.num_images = num_images
         self.positive_ratio = positive_ratio
         self.cache_dir = Path(cache_dir) if cache_dir else None
+        # Directory of precomputed per-sample .npz files (rgb + geometric),
+        # produced by precompute_cache.py and living on fast local storage
+        # (e.g. internal SSD). When set, __getitem__ skips PIL decode of the
+        # original image/mask and skips the scipy geometric computation
+        # entirely, reading a single small local file instead. Falls back
+        # to the original on-the-fly path for any sample not yet cached.
+        self.ssd_cache_dir = Path(ssd_cache_dir) if ssd_cache_dir else None
 
         self.transform = transform or transforms.Compose([
             transforms.Resize((224, 224)),
@@ -409,35 +417,63 @@ class SingleImageDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _ssd_cache_path(self, sample):
+        key = hashlib.md5(sample['image_path'].encode()).hexdigest()
+        return self.ssd_cache_dir / f"{key}_r{self.radius}_t{self.threshold}.npz"
+
+    def _load_from_ssd_cache(self, sample):
+        """Returns (rgb_pil, geometric_np) if a precomputed cache entry exists
+        for this sample, else None (caller falls back to on-the-fly path)."""
+        cache_path = self._ssd_cache_path(sample)
+        if not cache_path.exists():
+            return None
+        try:
+            data = np.load(cache_path)
+            rgb_resized = Image.fromarray(data['rgb'])  # uint8 HWC, already 224x224
+            if self.use_geometric:
+                # stored quantized to uint8 [0,255] to keep files small; rescale back to [0,1]
+                geometric = data['geometric'].astype(np.float32) / 255.0
+            else:
+                geometric = np.zeros((3, 224, 224), dtype=np.float32)
+            return rgb_resized, geometric
+        except Exception:
+            # Corrupt/partial file (e.g. interrupted precompute run) - fall back
+            return None
+
     def __getitem__(self, idx):
         sample = self.samples[idx]
 
-        rgb_image = Image.open(sample['image_path']).convert('RGB')
-        rgb_resized = rgb_image.resize((224, 224), Image.BILINEAR)
+        cached = self._load_from_ssd_cache(sample) if self.ssd_cache_dir else None
 
-        if self.use_geometric:
-            mask_image = Image.open(sample['mask_path']).convert('L')
-            orig_w, orig_h = mask_image.size
-            scale = 224.0 / max(orig_w, orig_h)
-            mask_resized = mask_image.resize((224, 224), Image.NEAREST)
-            mask_array = np.array(mask_resized)
-            scaled_radius = max(1, int(round(self.radius * scale)))
-            scaled_threshold = max(1, int(round(self.threshold * scale)))
+        if cached is not None:
+            rgb_resized, geometric = cached
+        else:
+            rgb_image = Image.open(sample['image_path']).convert('RGB')
+            rgb_resized = rgb_image.resize((224, 224), Image.BILINEAR)
 
-            if self.cache_dir:
-                geom_cache_dir = self.cache_dir / 'geom'
-                geom_cache_dir.mkdir(parents=True, exist_ok=True)
-                mask_key = hashlib.md5(sample['mask_path'].encode()).hexdigest()
-                geom_file = geom_cache_dir / f"{mask_key}_r{self.radius}_t{self.threshold}.npy"
-                if geom_file.exists():
-                    geometric = np.load(geom_file)
+            if self.use_geometric:
+                mask_image = Image.open(sample['mask_path']).convert('L')
+                orig_w, orig_h = mask_image.size
+                scale = 224.0 / max(orig_w, orig_h)
+                mask_resized = mask_image.resize((224, 224), Image.NEAREST)
+                mask_array = np.array(mask_resized)
+                scaled_radius = max(1, int(round(self.radius * scale)))
+                scaled_threshold = max(1, int(round(self.threshold * scale)))
+
+                if self.cache_dir:
+                    geom_cache_dir = self.cache_dir / 'geom'
+                    geom_cache_dir.mkdir(parents=True, exist_ok=True)
+                    mask_key = hashlib.md5(sample['mask_path'].encode()).hexdigest()
+                    geom_file = geom_cache_dir / f"{mask_key}_r{self.radius}_t{self.threshold}.npy"
+                    if geom_file.exists():
+                        geometric = np.load(geom_file)
+                    else:
+                        geometric = create_geometric_features(mask_array, scaled_radius, scaled_threshold)
+                        np.save(geom_file, geometric)
                 else:
                     geometric = create_geometric_features(mask_array, scaled_radius, scaled_threshold)
-                    np.save(geom_file, geometric)
             else:
-                geometric = create_geometric_features(mask_array, scaled_radius, scaled_threshold)
-        else:
-            geometric = np.zeros((3, 224, 224), dtype=np.float32)
+                geometric = np.zeros((3, 224, 224), dtype=np.float32)
 
         if self.augment and self.augment_cfg is not None and self.augment_cfg.ENABLED:
             rgb_resized, geometric = self._apply_augmentation(rgb_resized, geometric)
