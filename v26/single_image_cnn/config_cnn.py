@@ -19,8 +19,8 @@ class DataConfig:
     NUM_IMAGES_VAL: int = 50000
     POSITIVE_RATIO: float = 0.07
     SAME_PAIR_BATCH: bool = False
-    RADIUS: int = 45
-    THRESHOLD: int = 45
+    RADIUS: int = 50
+    THRESHOLD: int = 50
     CACHE_DIR: str = ".data_cache"
 
 

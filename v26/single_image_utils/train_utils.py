@@ -200,14 +200,8 @@ def save_batch_samples_figure(batch_data, save_path, max_samples=32):
     n = len(scores)
     n_show = min(n, max_samples)
 
-    best_waste = n_show
-    best_cols, best_rows = n_show, 1
-    for c in range(int(np.ceil(np.sqrt(n_show))), n_show + 1):
-        r = int(np.ceil(n_show / c))
-        waste = c * r - n_show
-        if waste < best_waste or (waste == best_waste and c > best_cols):
-            best_waste = waste
-            best_cols, best_rows = c, r
+    best_cols = min(4, n_show)
+    best_rows = int(np.ceil(n_show / best_cols))
 
     fig, axes = plt.subplots(best_rows, best_cols, figsize=(best_cols * 3.5, best_rows * 3.5))
     axes_flat = axes.flatten() if best_rows > 1 or best_cols > 1 else [axes]
